@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 /* ---------------- byte <-> unicode tables (gpt-2 style) ----------- */
 static void byte_tables(Ds4fTokenizer *t) {
@@ -136,6 +137,15 @@ static int pair_merged(const Ds4fTokenizer *t, int a, int b) {
 int ds4f_tokenizer_load(Ds4fTokenizer *t, const char *path) {
     memset(t, 0, sizeof *t);
     byte_tables(t);
+
+    /* a directory arg means "find the tokenizer in here": try
+     * tokenizer.json first (HF byte-level BPE) */
+    char auto_path[4096];
+    struct stat st;
+    if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+        snprintf(auto_path, sizeof auto_path, "%s/tokenizer.json", path);
+        path = auto_path;
+    }
 
     FILE *f = fopen(path, "rb");
     if (!f) { fprintf(stderr, "tokenizer: cannot read %s\n", path); return -1; }

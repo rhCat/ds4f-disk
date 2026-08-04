@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 /* write a codepoint as UTF-8 into buf; returns length */
@@ -112,6 +113,22 @@ int main(void) {
             printf("FAIL plain char decode: '%s'\n", out);
             return 1;
         }
+    }
+
+    /* 5: loading a DIRECTORY auto-discovers tokenizer.json inside */
+    {
+        char dir[512];
+        snprintf(dir, sizeof dir, "/tmp/ds4f_tokd_%ld", (long)getpid());
+        if (mkdir(dir, 0700) != 0) { printf("FAIL mkdir\n"); return 1; }
+        char dp[600];
+        snprintf(dp, sizeof dp, "%s/tokenizer.json", dir);
+        if (rename(path, dp) != 0) { printf("FAIL rename\n"); return 1; }
+        Ds4fTokenizer t2;
+        if (ds4f_tokenizer_load(&t2, dir) != 0 || t2.nvocab != 259) {
+            printf("FAIL dir load\n");
+            return 1;
+        }
+        ds4f_tokenizer_free(&t2);
     }
 
     ds4f_tokenizer_free(&t);
