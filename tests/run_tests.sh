@@ -77,6 +77,29 @@ else
     pass=$((pass + 1))
 fi
 
+# quantize e2e (issue #2 step 1): self-test, dry-run, real, engine run
+if python3 tools/convert-ds4f.py self-test >/dev/null 2>&1; then
+    echo "PASS quantize_selftest"
+    pass=$((pass + 1))
+else
+    echo "FAIL quantize_selftest"
+    fail=$((fail + 1))
+fi
+if python3 tools/convert-ds4f.py quantize "$SYN/wrap" --out "$SYN/q" \
+        --dry-run >/dev/null 2>&1 \
+   && python3 tools/convert-ds4f.py quantize "$SYN/wrap" --out "$SYN/q" \
+        >/dev/null 2>&1 \
+   && [ -s "$SYN/q/pool-mxfp4.bin" ] && [ -s "$SYN/q/pool-mxfp4.json" ] \
+   && ./ds4f "$SYN/q" --trunk "$SYN/out/trunk.bin" \
+        --offsets "$SYN/out/trunk.offsets" --pool "$SYN/q/pool-mxfp4.bin" \
+        --gen 3 --cache-gb 1 >/dev/null 2>&1; then
+    echo "PASS e2e_quantize"
+    pass=$((pass + 1))
+else
+    echo "FAIL e2e_quantize"
+    fail=$((fail + 1))
+fi
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

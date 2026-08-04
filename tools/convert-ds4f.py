@@ -117,7 +117,8 @@ def discover(dirpath):
         idx, pb = read_safetensors_index(os.path.join(dirpath, fn))
         begins[fn] = pb
         for name, (dtype, shape, [a, b]) in idx.items():
-            shards[name] = (os.path.join(dirpath, fn), pb + a, b - a)
+            shards[name] = (os.path.join(dirpath, fn), pb + a, b - a,
+                            dtype, shape)
 
     if weight_map:  # index.json is authoritative about placement
         shards = {}
@@ -128,7 +129,8 @@ def discover(dirpath):
             idx, pb = read_safetensors_index(os.path.join(dirpath, fn))
             if name in idx:
                 a, b = idx[name][2]
-                shards[name] = (os.path.join(dirpath, fn), pb + a, b - a)
+                shards[name] = (os.path.join(dirpath, fn), pb + a, b - a,
+                                idx[name][0], idx[name][1])
     return shards, index_path, config
 
 
@@ -214,7 +216,7 @@ def cmd_inspect(dirpath):
             return
     shards, index_path, config = discover(dirpath)
     print(f"repo: {dirpath}")
-    print(f"shards: {len(set(os.path.basename(f) for f, _, _ in shards.values()))}"
+    print(f"shards: {len(set(os.path.basename(f) for f, *_ in shards.values()))}"
           f" safetensors file(s), {len(shards)} tensors")
     print(f"index.json: {'present' if os.path.exists(index_path) else 'absent'}")
     print(f"config.json: {'present' if config else 'ABSENT'}")
@@ -295,21 +297,23 @@ def classify(shards):
     dense: {L: [(...)]}  (layer tensors minus experts)
     shared: {L: [(...)]}, other: [(...)]."""
     experts, dense, shared, other = {}, {}, {}, []
-    for name, (fn, off, nb) in shards.items():
+    for name, (fn, off, nb, dt, shp) in shards.items():
         m = EXPERT_RE.search(name)
         if m:
             experts.setdefault((int(m.group(1)), int(m.group(2))),
-                               []).append((name, fn, off, nb))
+                               []).append((name, fn, off, nb, dt, shp))
             continue
         m = SHARED_RE.search(name)
         if m:
-            shared.setdefault(int(m.group(1)), []).append((name, fn, off, nb))
+            shared.setdefault(int(m.group(1)),
+                              []).append((name, fn, off, nb, dt, shp))
             continue
         m = LAYER_RE.match(name)
         if m:
-            dense.setdefault(int(m.group(1)), []).append((name, fn, off, nb))
+            dense.setdefault(int(m.group(1)),
+                             []).append((name, fn, off, nb, dt, shp))
             continue
-        other.append((name, fn, off, nb))
+        other.append((name, fn, off, nb, dt, shp))
     return experts, dense, shared, other
 
 
@@ -419,7 +423,7 @@ def cmd_convert(dirpath, outdir):
     # ---------------- trunk.bin + trunk.offsets ----------------
     srcs = {}
     def src(name):
-        fn, off, nb = shards[name]
+        fn, off, nb, _, _ = shards[name]
         if fn not in srcs:
             srcs[fn] = open(fn, "rb")
         return srcs[fn], off, nb
@@ -546,10 +550,14 @@ def cmd_make_synthetic(dirpath):
 
     sizes = {}
     for i, name in enumerate(names):
-        if "experts." in name:
-            sizes[name] = 32 if name.endswith(".weight") else 16
+        if "experts." in name and name.endswith(".scale"):
+            sizes[name] = 4            # one F32 scale
+        elif "experts." in name:
+            sizes[name] = 32           # F8_E4M3, 32 elements
+        elif "shared_experts" in name and name.endswith(".scale"):
+            sizes[name] = 4
         elif "shared_experts" in name:
-            sizes[name] = 24 if name.endswith(".weight") else 12
+            sizes[name] = 24
         elif "embed" in name:
             sizes[name] = 96
         elif name.endswith("gate"):
@@ -565,9 +573,16 @@ def cmd_make_synthetic(dirpath):
         entries = {}
         for name in snames:
             a = len(payload)
-            payload += blob(name, sizes[name])
-            entries[name] = {"dtype": "F32",
-                             "shape": [sizes[name] // 4],
+            data = blob(name, sizes[name])
+            payload += data
+            if name.endswith(".scale"):
+                dt, n = "F32", 1
+            elif ".weight" in name and ("experts" in name
+                                        or "shared_experts" in name):
+                dt, n = "F8_E4M3", sizes[name]
+            else:
+                dt, n = "F32", sizes[name] // 4
+            entries[name] = {"dtype": dt, "shape": [n],
                              "data_offsets": [a, a + sizes[name]]}
             wm[name] = f"model-0000{s + 1}-of-0000{n_shards}.safetensors"
         hdr = json.dumps(entries).encode()
@@ -584,8 +599,387 @@ def cmd_make_synthetic(dirpath):
           f"{n_shards} shards")
 
 
+# ----------------------------------------------------------------------
+# mxfp4 quantization (issue #2, milestone step 1)
+# ----------------------------------------------------------------------
+
+try:
+    import numpy as _np
+except ImportError:
+    _np = None
+
+# MX E2M1 magnitudes (2-bit exponent, 1-bit mantissa, bias 1)
+E2M1_MAGS = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
+
+
+def fp8_e4m3_decode(b):
+    s = (b >> 7) & 1
+    e = (b >> 3) & 0xF
+    m = b & 0x7
+    if e == 0:
+        v = m * (2.0 ** -9)
+    elif e == 0xF:
+        v = 448.0                      # inf/nan clamp to E4M3FN max finite
+    else:
+        v = (1.0 + m / 8.0) * (2.0 ** (e - 7))
+    return -v if s else v
+
+
+FP8_LUT = [fp8_e4m3_decode(i) for i in range(256)]
+if _np is not None:
+    FP8_LUT_NP = _np.array(FP8_LUT, _np.float32)
+
+
+def e8m0_scale(maxv):
+    """Block scale: smallest power of two s with maxv/s <= 6 (E2M1 max)."""
+    if maxv <= 0.0:
+        return 0
+    k = max(-127, min(127, int(__import__("math").ceil(
+        __import__("math").log2(maxv / 6.0)))))
+    return (k + 127) & 0xFF
+
+
+def e8m0_value(b):
+    return (2.0 ** ((b & 0xFF) - 127)) if b else (2.0 ** -127)
+
+
+def e2m1_encode(x):
+    ax = abs(x)
+    best, bd = 0, ax
+    for i, m in enumerate(E2M1_MAGS):
+        d = abs(ax - m)
+        if d < bd:
+            bd, best = d, i
+    return (0x8 if x < 0 else 0) | best
+
+
+def quantize_ndarray(x):
+    """x: np.float32 1-D. Returns (values_bytes, scale_bytes, stats).
+    Layout: 2 values per byte, even index in low nibble; one E8M0 scale
+    per 32-element block."""
+    n = x.shape[0]
+    nblocks = (n + 31) // 32
+    pad = nblocks * 32 - n
+    if pad:
+        x = _np.concatenate([x, _np.zeros(pad, _np.float32)])
+    X = x.reshape(nblocks, 32)
+    m = _np.max(_np.abs(X), axis=1)
+    with _np.errstate(divide="ignore", invalid="ignore"):
+        k = _np.ceil(_np.log2(_np.where(m > 0, m / 6.0, 1.0)))
+    k = _np.clip(k, -127, 127).astype(_np.int64)
+    sb = ((k + 127) & 0xFF).astype(_np.uint8)
+    s = _np.power(2.0, k.astype(_np.float32))
+    q = _np.divide(X, s[:, None], out=_np.zeros_like(X),
+                   where=s[:, None] != 0)
+    q = _np.clip(_np.rint(q), -6.0, 6.0)
+    mags = _np.array(E2M1_MAGS, _np.float32)
+    idx = _np.argmin(_np.abs(q[:, :, None] - mags[None, None, :]),
+                     axis=2).astype(_np.uint8)
+    sign = (q < 0).astype(_np.uint8)
+    flat = ((sign << 3) | (idx & 7)).reshape(-1)
+    if flat.size % 2:
+        flat = _np.concatenate([flat, _np.zeros(1, _np.uint8)])
+    packed = (flat[1::2] << 4) | flat[0::2]
+    dq = _np.where(q < 0, -1.0, 1.0) * mags[idx] * s[:, None]
+    err = _np.abs(dq - X)
+    stats = {"err_max": float(_np.max(err)),
+             "err_rms": float(_np.sqrt(_np.mean(err * err)))}
+    return packed.tobytes(), sb.tobytes(), stats
+
+
+def quantize_py(x):
+    """Pure-python fallback (fixtures/tests; numpy is required for the
+    real ~68 GB pool -- see warning in cmd_quantize)."""
+    n = len(x)
+    nblocks = (n + 31) // 32
+    nvals = nblocks * 32
+    out = bytearray((nvals + 1) // 2)
+    scales = bytearray(nblocks)
+    worst = 0.0
+    sumsq = 0.0
+    for bi in range(nblocks):
+        block = x[bi * 32:(bi + 1) * 32]
+        m = max((abs(v) for v in block), default=0.0)
+        sb = e8m0_scale(m)
+        scales[bi] = sb
+        s = e8m0_value(sb)
+        for j, v in enumerate(block):
+            nib = e2m1_encode(v / s if s else 0.0)
+            pos = bi * 32 + j
+            if pos % 2 == 0:
+                out[pos // 2] = nib
+            else:
+                out[pos // 2] |= nib << 4
+            dq = (E2M1_MAGS[nib & 7] * (1 if nib < 8 else -1)) * s
+            err = abs(dq - v)
+            if err > worst:
+                worst = err
+            sumsq += err * err
+    return bytes(out), bytes(scales), {"err_max": worst,
+                                       "err_rms": (sumsq / n) ** 0.5}
+
+
+def quantize(xs):
+    if _np is not None:
+        return quantize_ndarray(_np.asarray(xs, _np.float32))
+    return quantize_py(xs)
+
+
+def mxfp4_dequant(vbytes, sbytes, n):
+    nblocks = (n + 31) // 32
+    nvals = nblocks * 32
+    vals = []
+    for i in range(nvals):
+        byte = vbytes[i // 2]
+        nib = (byte >> (4 if i % 2 else 0)) & 0xF
+        mag = E2M1_MAGS[nib & 7]
+        sgn = -1.0 if (nib & 8) else 1.0
+        vals.append(sgn * mag * e8m0_value(sbytes[i // 32]))
+    return vals[:n]
+
+
+def cmd_self_test():
+    import random
+    random.seed(7)
+    worst = 0.0
+    for trial in range(300):
+        n = random.randint(1, 2000)
+        scale = 10.0 ** random.uniform(-4, 4)
+        xs = [random.uniform(-1, 1) * scale for _ in range(n)]
+        vb, sb, st = quantize(xs)
+        # determinism
+        vb2, sb2, _ = quantize(xs)
+        if vb != vb2 or sb != sb2:
+            print(f"self-test FAIL trial {trial}: not deterministic")
+            sys.exit(1)
+        back = mxfp4_dequant(vb, sb, n)
+        err = max(abs(a - b) for a, b in zip(xs, back))
+        worst = max(worst, err)
+        m = max((abs(v) for v in xs), default=0.0)
+        if err > max(m * 0.5, 1e-30) + 1e-30:
+            print(f"self-test FAIL trial {trial}: n={n} m={m} err={err}")
+            sys.exit(1)
+    print(f"self-test ok ({300} trials, worst abs err {worst:.6g})")
+
+
+def cmd_quantize(dirpath, outdir, dry_run=False):
+    root = find_repo_root(dirpath)
+    if root is None:
+        print(f"REFUSE: no repo-like content under {dirpath}")
+        sys.exit(1)
+    if root != dirpath:
+        print(f"found repo-like content under: {root}")
+        dirpath = root
+    shards, _, config = discover(dirpath)
+    mapped, _ = map_config(config)
+    missing = [k for k in REQUIRED if not mapped.get(k)]
+    if missing:
+        print(f"REFUSE: config keys missing: {', '.join(missing)}")
+        sys.exit(1)
+    experts, _, _, _ = classify(shards)
+    if not experts:
+        print("REFUSE: no routed experts matched")
+        sys.exit(1)
+    layers = sorted({L for L, _ in experts})
+
+    srcs = {}
+    def read(name):
+        fn, off, nb, dt, shp = shards[name]
+        if fn not in srcs:
+            srcs[fn] = open(fn, "rb")
+        srcs[fn].seek(off)
+        return srcs[fn].read(nb), dt, shp
+
+    def numel(shape):
+        n = 1
+        for d in shape:
+            n *= int(d)
+        return n
+
+    # resolve per-expert weight layout + scale scheme
+    problems = []
+    schemes = {}
+    layouts = {}            # (L,e) -> [(name, shape, vnbytes, snbytes, blocks)]
+    for (L, e) in sorted(experts):
+        tens = sorted(experts[(L, e)])
+        weights = [t for t in tens if t[0].endswith(".weight")]
+        layout = []
+        for t in weights:
+            name, fn, off, nb, dt, shp = t
+            sc_name = name[:-len(".weight")] + ".scale"
+            sc = next((x for x in tens if x[0] == sc_name), None)
+            if sc is None:
+                problems.append(f"{name}: no sibling .scale tensor")
+                continue
+            if dt != "F8_E4M3":
+                problems.append(f"{name}: dtype {dt}, expected F8_E4M3")
+                continue
+            wdata, _, _ = read(name)
+            sdata, sdt, sshp = read(sc_name)
+            if sdt != "F32":
+                problems.append(f"{sc_name}: dtype {sdt}, expected F32")
+                continue
+            n = numel(shp)
+            s_elems = len(sdata) // 4
+            if s_elems == 1:
+                scheme = "tensor"
+            elif len(shp) == 2 and s_elems == int(shp[0]):
+                scheme = "row"
+            else:
+                problems.append(f"{sc_name}: {s_elems} scales for shape {shp}")
+                continue
+            schemes[name] = scheme
+            layout.append((name, shp, (n + 1) // 2, (n + 31) // 32,
+                           (n + 31) // 32, scheme))
+        layouts[(L, e)] = layout
+
+    if dry_run:
+        sample = next(iter(layouts.values()))
+        print(f"expert weight tensors: {len(layouts)} experts, "
+              f"{len(sample)} tensors each")
+        for (name, shp, vnb, snb, blk, scheme) in sample:
+            print(f"  {name}: shape {shp}, scheme={scheme}, "
+                  f"values {vnb} B, block scales {snb} B ({blk} blocks)")
+        cnt = {}
+        for s in schemes.values():
+            cnt[s] = cnt.get(s, 0) + 1
+        print(f"scale schemes: {cnt}")
+        if problems:
+            print(f"PROBLEMS ({len(problems)}):")
+            for p in problems[:10]:
+                print(f"  {p}")
+        est = sum(vnb + snb for _, _, vnb, snb, _, _ in
+                  next(iter(layouts.values()))) * len(layouts)
+        print(f"estimated mxfp4 pool: {hsize(est)} "
+              f"(blocks of 32, E8M0 scales, values 2/byte)")
+        if problems:
+            sys.exit(1)
+        return
+
+    if problems:
+        print(f"REFUSE: {len(problems)} problems "
+              f"(run --dry-run for the list)")
+        sys.exit(1)
+    if _np is None and len(layouts) > 100:
+        print("WARNING: numpy not found; pure-python quantize will be "
+              "very slow on the real pool. Install numpy on the box.")
+
+    # expert slot size is computable from shapes alone (fixed-rate)
+    slot = sum(vnb + snb for _, _, vnb, snb, _, _ in
+               next(iter(layouts.values())))
+    for (L, e), layout in layouts.items():
+        s = sum(vnb + snb for _, _, vnb, snb, _, _ in layout)
+        if s != slot:
+            print(f"REFUSE: expert ({L},{e}) slot {s} != {slot}")
+            sys.exit(1)
+
+    os.makedirs(outdir, exist_ok=True)
+    pbin = open(os.path.join(outdir, "pool-mxfp4.bin"), "wb")
+    put_u64(pbin, slot)
+    put_u64(pbin, len(layers))
+    put_u64(pbin, mapped["n_experts"])
+
+    written = 0
+    done = 0
+    total = len(layouts)
+    tensor_meta = []
+    g_max, g_rms2, g_n = 0.0, 0.0, 0
+    for (L, e) in sorted(experts):
+        layout = layouts[(L, e)]
+        for (name, shp, vnb, snb, blk, scheme) in layout:
+            wdata, _, _ = read(name)
+            sdata, _, _ = read(name[:-len(".weight")] + ".scale")
+            n = numel(shp)
+            if _np is not None:
+                raw = _np.frombuffer(wdata, _np.uint8)
+                vals = FP8_LUT_NP[raw].astype(_np.float32)
+                if scheme == "tensor":
+                    vals = vals * struct.unpack("<f", sdata[:4])[0]
+                else:
+                    R, C = int(shp[0]), n // int(shp[0])
+                    sc = _np.frombuffer(sdata, _np.float32)
+                    vals = (vals.reshape(R, C) * sc[:, None]).reshape(-1)
+                vb, sbb, st = quantize_ndarray(vals)
+            else:
+                vals = [FP8_LUT[b] for b in wdata]
+                if scheme == "tensor":
+                    s = struct.unpack("<f", sdata[:4])[0]
+                    vals = [v * s for v in vals]
+                else:
+                    R, C = int(shp[0]), n // int(shp[0])
+                    sc = struct.unpack(f"<{R}f", sdata[:4 * R])
+                    vals = [vals[r * C + c] * sc[r]
+                            for r in range(R) for c in range(C)]
+                vb, sbb, st = quantize_py(vals)
+            v_off = 24 + written
+            pbin.write(vb)
+            pbin.write(sbb)
+            written += len(vb) + len(sbb)
+            tensor_meta.append({
+                "n": name, "layer": L, "expert": e, "shape": list(shp),
+                "v_off": v_off, "v_nbytes": len(vb),
+                "s_off": v_off + len(vb), "s_nbytes": len(sbb),
+                "blocks": blk, "err_max": st["err_max"],
+                "err_rms": st["err_rms"],
+            })
+            if st["err_max"] > g_max:
+                g_max = st["err_max"]
+            g_rms2 += (st["err_rms"] ** 2) * n
+            g_n += n
+        done += 1
+        if done % 2000 == 0:
+            print(f"  quantized {done}/{total} experts, {hsize(written)}")
+    pbin.close()
+    for f in srcs.values():
+        f.close()
+
+    meta = {
+        "format": "mxfp4-pool-v1",
+        "block_size": 32,
+        "value_layout": "2 per byte, even index low nibble",
+        "scale_format": "E8M0 per 32-element block",
+        "n_layers": len(layers),
+        "n_experts": mapped["n_experts"],
+        "expert_nbytes": slot,
+        "tensors": tensor_meta,
+        "error_summary": {
+            "tensor_max_abs": g_max,
+            "global_rms": (g_rms2 / g_n) ** 0.5 if g_n else 0.0,
+        },
+    }
+    with open(os.path.join(outdir, "pool-mxfp4.json"), "w") as f:
+        json.dump(meta, f, indent=1)
+
+    cfg_out = {
+        "n_layers": mapped["n_layers"],
+        "n_experts": mapped["n_experts"],
+        "topk": mapped["topk"],
+        "n_shared": mapped["n_shared"],
+        "hidden": mapped["hidden"],
+        "latent": mapped["latent"],
+        "moe_inter": mapped["moe_inter"],
+        "expert_nbytes": slot,
+        "seed": 7,
+    }
+    with open(os.path.join(outdir, "config.json"), "w") as f:
+        json.dump(cfg_out, f, indent=2)
+
+    if os.path.getsize(os.path.join(outdir, "pool-mxfp4.bin")) != 24 + written:
+        print("VERIFY FAIL: pool-mxfp4 size mismatch")
+        sys.exit(1)
+    print(f"pool-mxfp4.bin {hsize(written)} ({done} experts x "
+          f"{hsize(slot)})")
+    print(f"error summary: tensor max abs {g_max:.6g}, "
+          f"global rms {(g_rms2 / g_n) ** 0.5 if g_n else 0.0:.6g}")
+    print(f"config.json written (expert_nbytes={slot})")
+    print("run:")
+    print(f"  ./ds4f {outdir} --trunk TRUNK --offsets OFFSETS "
+          f"--pool {outdir}/pool-mxfp4.bin")
+
+
 def main():
-    if len(sys.argv) < 3:
+    if len(sys.argv) < 3 and not (len(sys.argv) == 2 and
+                                  sys.argv[1] == "self-test"):
         print(__doc__)
         sys.exit(1)
     cmd = sys.argv[1]
@@ -596,6 +990,14 @@ def main():
             print(__doc__)
             sys.exit(1)
         cmd_convert(sys.argv[2], sys.argv[sys.argv.index("--out") + 1])
+    elif cmd == "quantize":
+        if "--out" not in sys.argv:
+            print(__doc__)
+            sys.exit(1)
+        cmd_quantize(sys.argv[2], sys.argv[sys.argv.index("--out") + 1],
+                     dry_run="--dry-run" in sys.argv)
+    elif cmd == "self-test":
+        cmd_self_test()
     elif cmd == "make-synthetic":
         cmd_make_synthetic(sys.argv[2])
     else:
