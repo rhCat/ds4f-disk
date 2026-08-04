@@ -3,6 +3,7 @@
 #include "ds4f/kernels.h"
 #include "json.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
