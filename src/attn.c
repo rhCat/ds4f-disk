@@ -1,6 +1,7 @@
 /* attn.c -- MLA attention step + KV cache (issue #6, step 2). */
 #include "ds4f/attn.h"
 #include "ds4f/kernels.h"
+#include "ds4f/moe.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -161,6 +162,10 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
     f8_matvec_t(tl, wob, wob_s, tr, H, H, cha, chb);
     f8_matvec_t(tl, woc, woc_s, tr, H, H, chb, chc);
     for (int i = 0; i < H; i++) state[i] += chc[i];
+    /* hyper-connection scale (issue #6): the checkpoint's learned
+     * per-layer activation bound, applied after the attention residual
+     * (the hc_ffn_base applies in moe_step) */
+    ds4f_apply_hc(tl, tl->hc_attn[L], tr, H, state);
 
     free(buf);
     return 0;

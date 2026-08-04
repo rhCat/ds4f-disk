@@ -89,6 +89,7 @@ int main(void) {
     tl.t = (Ds4fTrunkTensor *)calloc(16, sizeof(Ds4fTrunkTensor));
     tl.t_off = (int *)calloc(2, sizeof(int));
     tl.gate[0] = -1;
+    tl.hc_attn[0] = tl.hc_ffn[0] = -1;   /* no hyper-connections here */
     tl.attn_qn[0] = 12;
     tl.attn_kvn[0] = 13;
     tl.attn_wqa[0] = 0;  tl.attn_wqa_s[0] = 1;

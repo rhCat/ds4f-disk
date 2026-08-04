@@ -5,6 +5,9 @@ cd "$(dirname "$0")/.."
 
 CC="${CC:-cc}"
 CFLAGS="-std=c99 -O2 -Wall -Wextra -pthread -Iinclude -Isrc"
+case "$(uname)" in
+    Darwin) CFLAGS="-std=c99 -O0 -Wall -Wextra -pthread -Iinclude -Isrc" ;;
+esac
 mkdir -p build
 
 pass=0

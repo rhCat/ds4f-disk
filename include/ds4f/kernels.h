@@ -75,6 +75,10 @@ float ds4f_f16_to_f32(uint16_t h);
 void ds4f_f16_matvec(const uint16_t *W, int R, int C, const float *x,
                      float *y);
 
+/* single F8_E4M3 byte to float (the scalar LUT; used by the hc_*
+ * hyper-connection scales). */
+float ds4f_f8_value(uint8_t b);
+
 /* F8 decode of one row of a [V x H] F8_E4M3 tensor with E8M0 block
  * scales [SR x SC] (element (r,c) uses scale[r*SR/V][c*SC/H]); NULL
  * scales means 1.0 everywhere. Used by the embedding gather. */

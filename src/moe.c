@@ -168,6 +168,7 @@ int ds4f_trunk_layout_load(Ds4fTrunkLayout *tl, const char *path) {
         tl->attn_wob[L] = tl->attn_wob_s[L] = -1;
         tl->attn_woc[L] = tl->attn_woc_s[L] = -1;
         tl->attn_sink[L] = -1;
+        tl->hc_attn[L] = tl->hc_ffn[L] = -1;
     }
     tl->kvlat = 0;
 
@@ -295,6 +296,10 @@ int ds4f_trunk_layout_load(Ds4fTrunkLayout *tl, const char *path) {
                 } else if (name_ends(tt->name, ".attn.attn_sink") &&
                            tt->dtype == 0) {
                     if (tl->attn_sink[L] < 0) tl->attn_sink[L] = k - 1;
+                } else if (name_ends(tt->name, ".hc_attn_base")) {
+                    if (tl->hc_attn[L] < 0) tl->hc_attn[L] = k - 1;
+                } else if (name_ends(tt->name, ".hc_ffn_base")) {
+                    if (tl->hc_ffn[L] < 0) tl->hc_ffn[L] = k - 1;
                 }
             }
         }
@@ -394,6 +399,56 @@ static void *exp_run(void *arg) {
     free(cur);
     free(tmp);
     return NULL;
+}
+
+static float bf16_f(uint16_t h) {
+    uint32_t bits = (uint32_t)h << 16;
+    float f;
+    memcpy(&f, &bits, sizeof f);
+    return f;
+}
+
+/* Hyper-connection scale (issue #6): elementwise [H] or scalar,
+ * F32/BF16/I8/F8. No-op when idx < 0. */
+void ds4f_apply_hc(const Ds4fTrunkLayout *tl, int idx, const uint8_t *tr,
+                   int H, float *state) {
+    if (idx < 0) return;
+    const Ds4fTrunkTensor *t = &tl->t[idx];
+    const uint8_t *p = tr + t->off;
+    long n = t->dims[0] > 0 ? t->dims[0] : 1;
+    if (t->dtype == 0) {                        /* F32 */
+        const float *f = (const float *)(const void *)p;
+        if (n == 1) {
+            for (int i = 0; i < H; i++) state[i] *= f[0];
+        } else {
+            for (int i = 0; i < H && i < n; i++) state[i] *= f[i];
+        }
+    } else if (t->dtype == 4) {                 /* BF16 */
+        const uint16_t *b = (const uint16_t *)(const void *)p;
+        if (n == 1) {
+            float s = bf16_f(b[0]);
+            for (int i = 0; i < H; i++) state[i] *= s;
+        } else {
+            for (int i = 0; i < H && i < n; i++)
+                state[i] *= bf16_f(b[i]);
+        }
+    } else if (t->dtype == 1) {                 /* I8 */
+        const int8_t *s8 = (const int8_t *)(const void *)p;
+        if (n == 1) {
+            for (int i = 0; i < H; i++) state[i] *= (float)s8[0];
+        } else {
+            for (int i = 0; i < H && i < n; i++)
+                state[i] *= (float)s8[i];
+        }
+    } else if (t->dtype == 2) {                 /* F8_E4M3 */
+        if (n == 1) {
+            float s = ds4f_f8_value(p[0]);
+            for (int i = 0; i < H; i++) state[i] *= s;
+        } else {
+            for (int i = 0; i < H && i < n; i++)
+                state[i] *= ds4f_f8_value(p[i]);
+        }
+    }
 }
 
 int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
@@ -520,22 +575,25 @@ int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
     if (!up_ok)
         for (int i = 0; i < H && i < Lat; i++) state[i] += acc[i];
 
-    /* Skeleton normalization. The real model bounds activations through
-     * its hyperconnection machinery (hc_* tensors), which this reference
-     * does not implement; without any normalization the residual chain
-     * compounds and state goes non-finite within a few tokens (observed
-     * on the real checkpoint). Rescale the post-residual state to the
-     * RMS it had on entry. Deterministic (IEEE sqrtf/div), and both
-     * backends must match it exactly. */
-    double ss = 0.0;
-    for (int i = 0; i < H; i++) {
-        float v = state[i];
-        ss += (double)v * v;
+    /* Activation bounding. The real model does this through its
+     * hyperconnection machinery: the hc_ffn_base tensor scales the
+     * post-residual state elementwise (learned per-element norm). When
+     * the checkpoint carries hc_* tensors, use them; otherwise fall
+     * back to the RMS-rescale (deterministic IEEE sqrtf/div, both
+     * backends must match it exactly). */
+    if (tl && tl->hc_ffn[L] >= 0) {
+        ds4f_apply_hc(tl, tl->hc_ffn[L], tr, H, state);
+    } else {
+        double ss = 0.0;
+        for (int i = 0; i < H; i++) {
+            float v = state[i];
+            ss += (double)v * v;
+        }
+        float rms_out = sqrtf((float)(ss / (double)H)) + 1e-30f;
+        float gain = rms_in / rms_out;
+        if (gain > 0.0f && gain < 1e30f)
+            for (int i = 0; i < H; i++) state[i] *= gain;
     }
-    float rms_out = sqrtf((float)(ss / (double)H)) + 1e-30f;
-    float gain = rms_in / rms_out;
-    if (gain > 0.0f && gain < 1e30f)
-        for (int i = 0; i < H; i++) state[i] *= gain;
 
     free(latent); free(cur); free(out); free(acc);
     return 0;

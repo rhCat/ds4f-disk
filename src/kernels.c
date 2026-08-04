@@ -154,6 +154,11 @@ void ds4f_f8_decode_row(const uint8_t *W, const uint8_t *scales,
     }
 }
 
+float ds4f_f8_value(uint8_t b) {
+    if (!fp8_lut_ready) fp8_lut_build();
+    return fp8_lut[b];
+}
+
 void ds4f_i8_matvec(const uint8_t *W, const uint8_t *scales,
                     int R, int C, int SR, int SC, const float *x,
                     float *y) {

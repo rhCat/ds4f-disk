@@ -745,6 +745,8 @@ def cmd_make_synthetic(dirpath):
         shape_of[f"layers.{L}.attn.q_norm.weight"] = [4]
         shape_of[f"layers.{L}.attn.kv_norm.weight"] = [4]
         shape_of[f"layers.{L}.attn.attn_sink"] = [64]
+        shape_of[f"layers.{L}.hc_attn_base"] = [8]
+        shape_of[f"layers.{L}.hc_ffn_base"] = [8]
         shape_of[f"layers.{L}.ffn.gate.weight"] = [4, 8]
         shape_of[f"layers.{L}.ffn.gate.bias"] = [4]
         shape_of[f"layers.{L}.ffn.down"] = [8, 8]

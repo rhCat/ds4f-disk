@@ -1,11 +1,12 @@
 CC      ?= cc
-# macOS (Apple clang) defaults to -O1: at -O2 this code hits a clang
-# optimizer miscompile (~15-25% run-to-run divergence / mfm traps,
-# heap-layout dependent; no UB found by UBSan, -O1 is 100% clean,
-# Linux gcc -O2 is clean). Override with
-#   make CFLAGS="-std=c99 -O2 -Wall -Wextra -pthread"
+# macOS (Apple clang) defaults to -O0: at -O1/-O2 this code hits a
+# clang codegen issue (~15-70% run-to-run divergence / SIGBUS / mfm
+# traps on some heap layouts; UBSan-clean, lldb-irreproducible, Linux
+# gcc -O2 clean). -O0 is 100% deterministic on both paths -- the Mac
+# is the dev/test box, the deployment target (acer/DGX, Linux) builds
+# -O2. Override with make CFLAGS="-std=c99 -O2 -Wall -Wextra -pthread".
 ifeq ($(shell uname),Darwin)
-CFLAGS  ?= -std=c99 -O1 -Wall -Wextra -pthread
+CFLAGS  ?= -std=c99 -O0 -Wall -Wextra -pthread
 else
 CFLAGS  ?= -std=c99 -O2 -Wall -Wextra -pthread
 endif

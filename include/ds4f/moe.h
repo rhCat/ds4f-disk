@@ -69,11 +69,18 @@ typedef struct Ds4fTrunkLayout {
     int   attn_wob[DS4F_MAX_LAYERS],  attn_wob_s[DS4F_MAX_LAYERS];
     int   attn_woc[DS4F_MAX_LAYERS],  attn_woc_s[DS4F_MAX_LAYERS];
     int   attn_sink[DS4F_MAX_LAYERS];
+    int   hc_attn[DS4F_MAX_LAYERS], hc_ffn[DS4F_MAX_LAYERS];
     int   kvlat;                /* wkv output dim (0 = no attention) */
 } Ds4fTrunkLayout;
 
 /* Load trunk.json (as written by tools/convert-ds4f.py convert). */
 int ds4f_trunk_layout_load(Ds4fTrunkLayout *tl, const char *path);
+
+/* Apply a hyper-connection scale tensor (hc_attn_base / hc_ffn_base,
+ * issue #6): elementwise [H] or scalar, F32/BF16/I8/F8. No-op when
+ * idx < 0. Replaces the RMS-rescale stand-in when present. */
+void ds4f_apply_hc(const Ds4fTrunkLayout *tl, int idx, const uint8_t *tr,
+                   int H, float *state);
 
 /* Top-k over scores: descending, tie-break by expert index (earlier
  * expert wins ties -- deterministic). */
