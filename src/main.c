@@ -424,6 +424,20 @@ int main(int argc, char **argv) {
                     if (hok > 0) {
                         ds4f_hc_combine(nhc, cfg.hidden, A, state, xin_buf);
                         rstate = xin_buf;
+                        if (getenv("DS4F_DEBUG5")) {
+                            fprintf(stderr,
+                                    "[dbg5] t%d L%d ffn A=", t, L);
+                            for (int j = 0; j < nhc; j++)
+                                fprintf(stderr, " %.4f", (double)A[j]);
+                            fprintf(stderr, " C=");
+                            for (int j = 0; j < nhc; j++)
+                                fprintf(stderr, " %.4f", (double)C[j]);
+                            fprintf(stderr, " B[0][*]=");
+                            for (int k = 0; k < nhc; k++)
+                                fprintf(stderr, " %.4f",
+                                        (double)B[0 * nhc + k]);
+                            fprintf(stderr, "\n");
+                        }
                     }
                 }
                 if (gt->dtype == 4)      /* BF16 */
