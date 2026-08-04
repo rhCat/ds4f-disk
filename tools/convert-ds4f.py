@@ -123,47 +123,68 @@ def discover(dirpath):
     return shards, index_path, config
 
 
-def classify(shards):
-    """experts: {(L, e): [(name, file, off, nbytes)]}
-    dense: {L: [(...)]}  (layer tensors minus experts)
-    shared: {L: [(...)]}, other: [(...)]."""
-    experts, dense, shared, other = {}, {}, {}, []
-    for name, (fn, off, nb) in shards.items():
-        m = EXPERT_RE.search(name)
-        if m:
-            experts.setdefault((int(m.group(1)), int(m.group(2))),
-                               []).append((name, fn, off, nb))
-            continue
-        m = SHARED_RE.search(name)
-        if m:
-            shared.setdefault(int(m.group(1)), []).append((name, fn, off, nb))
-            continue
-        m = LAYER_RE.match(name)
-        if m:
-            dense.setdefault(int(m.group(1)), []).append((name, fn, off, nb))
-            continue
-        other.append((name, fn, off, nb))
-    return experts, dense, shared, other
+def looks_like_repo(d):
+    return (os.path.exists(os.path.join(d, "config.json")) or
+            any(f.endswith(".safetensors")
+                for f in os.listdir(d)) if os.path.isdir(d) else False)
 
 
-def map_config(config):
-    mapped = {}
-    assumptions = []
-    for key, aliases in ALIASES.items():
-        src = next((a for a in aliases if a in config), None)
-        if src is not None:
-            mapped[key] = int(config[src])
-        elif key in REQUIRED:
-            mapped[key] = None
-        else:
-            assumptions.append(key)
-    if "latent" in assumptions and mapped.get("hidden"):
-        mapped["latent"] = mapped["hidden"]
-        assumptions.remove("latent")
-    if "moe_inter" in assumptions and mapped.get("hidden"):
-        mapped["moe_inter"] = mapped["hidden"]
-        assumptions.remove("moe_inter")
-    return mapped, assumptions
+def find_repo_root(dirpath, maxdepth=5):
+    """If dirpath itself is not an HF repo, walk down (bounded) to find
+    the deepest-looking subdir with config.json or .safetensors --
+    HF git clones put the real files under snapshots/<hash>/. Returns
+    None when nothing repo-like exists anywhere."""
+    if os.path.isdir(dirpath) and looks_like_repo(dirpath):
+        return dirpath
+    import collections
+    q = collections.deque([(dirpath, 0)])
+    found = []
+    while q:
+        d, depth = q.popleft()
+        if depth >= maxdepth:
+            continue
+        try:
+            entries = os.listdir(d)
+        except OSError:
+            continue
+        for e in entries:
+            p = os.path.join(d, e)
+            if os.path.isdir(p) and not os.path.islink(p):
+                if looks_like_repo(p):
+                    found.append(p)
+                q.append((p, depth + 1))
+    return sorted(found, key=len)[0] if found else None
+
+
+def tree_summary(dirpath):
+    """What is actually in this directory, when it is not an HF repo."""
+    try:
+        entries = sorted(os.listdir(dirpath))
+    except OSError as ex:
+        print(f"cannot list {dirpath}: {ex}")
+        return
+    print(f"contents of {dirpath} ({len(entries)} entries):")
+    exts = {}
+    for e in entries:
+        p = os.path.join(dirpath, e)
+        if os.path.isdir(p):
+            print(f"  [dir]  {e}/")
+            continue
+        try:
+            sz = os.path.getsize(p)
+        except OSError:
+            sz = -1
+        ext = os.path.splitext(e)[1].lower() or "(none)"
+        exts[ext] = exts.get(ext, 0) + 1
+        print(f"  [file] {e}  ({hsize(sz)})")
+    if exts:
+        print("extensions: " + ", ".join(f"{k} x{v}" for k, v in
+                                         sorted(exts.items())))
+    if ".gguf" in exts:
+        print("note: GGUF found -- ds4f reads safetensors; convert to "
+              "safetensors first (llama.cpp/convert_hf_to_gguf reverse)")
+    if entries and not exts:
+        print("note: only directories -- HF snapshot layout?")
 
 
 # ----------------------------------------------------------------------
@@ -171,6 +192,17 @@ def map_config(config):
 # ----------------------------------------------------------------------
 
 def cmd_inspect(dirpath):
+    root = find_repo_root(dirpath)
+    if root != dirpath:
+        tree_summary(dirpath)
+        if root:
+            print(f"\nfound repo-like content under: {root}")
+            dirpath = root
+        else:
+            print("\nno repo-like content found anywhere (no config.json, "
+                  "no .safetensors). If this is a git-lfs clone, run "
+                  "`git lfs pull` first, then re-inspect.")
+            return
     shards, index_path, config = discover(dirpath)
     print(f"repo: {dirpath}")
     print(f"shards: {len(set(os.path.basename(f) for f, _, _ in shards.values()))}"
@@ -233,6 +265,49 @@ def cmd_inspect(dirpath):
         print(f"\nestimate: pool.bin {hsize(eb * len(experts))}, "
               f"trunk.bin {hsize(trunk_bytes)}")
         print("  (bytes copied as-is; dtypes preserved, no quantization)")
+
+
+def classify(shards):
+    """experts: {(L, e): [(name, file, off, nbytes)]}
+    dense: {L: [(...)]}  (layer tensors minus experts)
+    shared: {L: [(...)]}, other: [(...)]."""
+    experts, dense, shared, other = {}, {}, {}, []
+    for name, (fn, off, nb) in shards.items():
+        m = EXPERT_RE.search(name)
+        if m:
+            experts.setdefault((int(m.group(1)), int(m.group(2))),
+                               []).append((name, fn, off, nb))
+            continue
+        m = SHARED_RE.search(name)
+        if m:
+            shared.setdefault(int(m.group(1)), []).append((name, fn, off, nb))
+            continue
+        m = LAYER_RE.match(name)
+        if m:
+            dense.setdefault(int(m.group(1)), []).append((name, fn, off, nb))
+            continue
+        other.append((name, fn, off, nb))
+    return experts, dense, shared, other
+
+
+def map_config(config):
+    mapped = {}
+    assumptions = []
+    for key, aliases in ALIASES.items():
+        src = next((a for a in aliases if a in config), None)
+        if src is not None:
+            mapped[key] = int(config[src])
+        elif key in REQUIRED:
+            mapped[key] = None
+        else:
+            assumptions.append(key)
+    if "latent" in assumptions and mapped.get("hidden"):
+        mapped["latent"] = mapped["hidden"]
+        assumptions.remove("latent")
+    if "moe_inter" in assumptions and mapped.get("hidden"):
+        mapped["moe_inter"] = mapped["hidden"]
+        assumptions.remove("moe_inter")
+    return mapped, assumptions
 
 
 # ----------------------------------------------------------------------
