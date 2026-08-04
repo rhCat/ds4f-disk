@@ -8,13 +8,13 @@ HDR = include/ds4f/ds4f.h include/ds4f/kernels.h include/ds4f/moe.h src/json.h
 all: ds4f pack-trunk make-fixture
 
 ds4f: src/main.c $(SRC) $(HDR)
-	$(CC) $(CFLAGS) $(INC) -o $@ src/main.c $(SRC)
+	$(CC) $(CFLAGS) $(INC) -o $@ src/main.c $(SRC) -lm
 
 pack-trunk: tools/pack-trunk.c $(HDR)
-	$(CC) $(CFLAGS) $(INC) -o $@ tools/pack-trunk.c
+	$(CC) $(CFLAGS) $(INC) -o $@ tools/pack-trunk.c -lm
 
 make-fixture: tools/make-fixture.c $(HDR)
-	$(CC) $(CFLAGS) $(INC) -o $@ tools/make-fixture.c
+	$(CC) $(CFLAGS) $(INC) -o $@ tools/make-fixture.c -lm
 
 test: all
 	./tests/run_tests.sh
