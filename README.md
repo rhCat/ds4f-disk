@@ -108,10 +108,15 @@ structure at real scale; kernels are roadmap.
 
 ## Roadmap
 
-- [ ] Real DeepSeek-V4-Flash config + safetensors layout (dense/attention
-      tensors -> pack-trunk; `e.{layer}.{expert}` pool; shared experts
-      resident)
-- [ ] mxfp4 kernels: multiply straight out of the packed 4-bit form
+- [x] Real DeepSeek-V4-Flash layout: convert + packed pool + quantize
+      (I8 + F8_E8M0 block16 -> mxfp4 E2M1/E8M0 block32; 68.53 GB pool,
+      error rms 0.79; engine runs the mxfp4 pool, expert reads halved)
+- [x] Scalar mxfp4 kernels: decode / matvec / router scores
+      (src/kernels.c, fixture-gated: known vectors, round trip,
+      matvec + router vs reference)
+- [ ] Pipeline: async expert fetch overlapping compute; real router
+      wiring (needs trunk tensor layout manifest from the converter)
+- [ ] SIMD: AVX2 / NEON paths, bit-identical vs scalar on fixtures
 - [ ] DSpark synergy: draft pass as a free prefetch for the target pass
 - [ ] Hash-map cache lookup at full slot counts (linear scan is fine at
       fixture scale)
