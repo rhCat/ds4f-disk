@@ -123,10 +123,10 @@ static JEntry *j_object(JDoc *d, const char **pp, const char *end) {
         }
     }
 
-    JEntry *obj = j_new(d);
-    if (!obj) return NULL;
+    JEntry *e = j_new(d);
+    if (!e) return NULL;
     int obj_i = d->npool - 1;               /* index, not pointer: pool may realloc */
-    obj->type = 2;
+    e->type = 2;
     int base = j_reserve(d, n);
     if (base < 0) return NULL;
 
@@ -139,6 +139,7 @@ static JEntry *j_object(JDoc *d, const char **pp, const char *end) {
         p2++;                               /* ':' */
         JEntry *v = j_value(d, &p2, end);
         if (!v) return NULL;
+        if (base + i >= d->cap) return NULL;  /* count pass diverged */
         d->pool[base + i] = *v;             /* re-fetch pool each iteration */
         d->pool[base + i].key = s;
         d->pool[base + i].key_end = e;
@@ -146,7 +147,8 @@ static JEntry *j_object(JDoc *d, const char **pp, const char *end) {
         if (p2 < end && *p2 == ',') p2++;
     }
     if (p2 < end && *p2 == '}') p2++;
-    obj = &d->pool[obj_i];
+    if (obj_i >= d->npool) return NULL;
+    JEntry *obj = &d->pool[obj_i];
     obj->child = &d->pool[base];
     obj->nchild = n;
     *pp = p2;
@@ -197,6 +199,7 @@ static JEntry *j_value(JDoc *d, const char **pp, const char *end) {
             p = j_ws(p, end);
             JEntry *v = j_value(d, &p, end);
             if (!v) return NULL;
+            if (base + i >= d->cap) return NULL;  /* count pass diverged */
             d->pool[base + i] = *v;     /* element COPY into the block */
             p = j_ws(p, end);
             if (p < end && *p == ',') p++;
