@@ -1,7 +1,8 @@
 build/
-ds4f
-pack-trunk
-make-fixture
+/ds4f
+/pack-trunk
+/make-fixture
+/bench-kernels
 *.o
 *.csv
 *.log
