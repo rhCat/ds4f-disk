@@ -174,6 +174,7 @@ int main(int argc, char **argv) {
     Ds4fPoolLayout pl;
     int moe_mode = 0;
     float *state = NULL, *scratch = NULL;
+    float **jscratch = NULL;
     long scratch_n = 0;
     int64_t n_matvec = 0, n_decode = 0;
     if (tl_path && pl_path) {
@@ -188,7 +189,18 @@ int main(int argc, char **argv) {
         scratch_n = pl.max_rc;
         scratch = (float *)malloc((size_t)scratch_n * sizeof(float));
         if (!scratch) { fprintf(stderr, "moe: scratch alloc failed\n"); return 2; }
-        plan.state_b += (double)scratch_n * 4.0;
+        /* job-scratch pool: topk-1 extra max_rc buffers, allocated ONCE
+         * (per-call malloc page-faults ~16 MB x topk x layers) */
+        jscratch = (float **)calloc((size_t)cfg.topk, sizeof(float *));
+        if (!jscratch) { fprintf(stderr, "moe: jscratch alloc failed\n"); return 2; }
+        for (int k = 1; k < cfg.topk; k++) {
+            jscratch[k] = (float *)malloc((size_t)scratch_n * sizeof(float));
+            if (!jscratch[k]) {
+                fprintf(stderr, "moe: jscratch[%d] alloc failed\n", k);
+                return 2;
+            }
+        }
+        plan.state_b += (double)scratch_n * 4.0 * (double)cfg.topk;
         plan.need_b = plan.trunk_pin_b + plan.trunk_ring_b + plan.cache_b +
                       plan.shared_b + plan.state_b + plan.index_b;
         int nreal = 0;
@@ -257,7 +269,7 @@ int main(int argc, char **argv) {
                 for (int j = 0; j < cfg.topk; j++)
                     es[j] = ds4f_cache_slot(&cache, slots[j]);
                 if (ds4f_moe_step(&cfg, &tl, L, tr, &pl, es, idx, w,
-                                  state, scratch, scratch_n,
+                                  state, scratch, scratch_n, jscratch,
                                   &n_matvec, &n_decode) != 0) {
                     fprintf(stderr, "moe step failed at layer %d\n", L);
                     return 2;
@@ -337,6 +349,10 @@ int main(int argc, char **argv) {
 
     free(state);
     free(scratch);
+    if (jscratch) {
+        for (int k = 1; k < cfg.topk; k++) free(jscratch[k]);
+        free(jscratch);
+    }
     ds4f_cache_free(&cache);
     ds4f_trunk_close(&trunk);
     free(pool.ref);

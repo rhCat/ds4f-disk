@@ -330,6 +330,7 @@ int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
                   const uint8_t *tr, const Ds4fPoolLayout *pl,
                   const uint8_t *const *es, const int *sel, const float *wsel,
                   float *state, float *scratch, long scratch_n,
+                  float *const *job_scratch,
                   int64_t *n_matvec, int64_t *n_decode) {
     int H = cfg->hidden, Lat = cfg->latent, M = cfg->moe_inter;
     int D = H > Lat ? H : Lat;
@@ -351,7 +352,7 @@ int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
         return -1;
     }
     (void)cur;              /* expert chains now run in worker threads */
-    (void)scratch;          /* per-job scratch allocated below */
+    (void)scratch;          /* job 0 uses the caller's warm buffer */
 
     /* latent = W_down * state (identity when absent / mismatched) */
     int di = tl ? tl->down[L] : -1, ui = tl ? tl->up[L] : -1;
@@ -386,9 +387,11 @@ int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
         jb->slot = es[j];
         jb->latent = latent;
         jb->out = (float *)malloc((size_t)Lat * sizeof(float));
-        jb->scratch = (float *)malloc((size_t)scratch_n * sizeof(float));
+        /* job 0 reuses the caller's warm scratch; the rest come from
+         * the caller's pool -- never malloc per call (page faults). */
+        jb->scratch = (njob == 0) ? scratch : job_scratch[njob - 1];
         if (!jb->out || !jb->scratch) {
-            free(jb->out); free(jb->scratch);
+            free(jb->out);           /* scratch is borrowed, never freed */
             free(latent); free(cur); free(out); free(acc);
             return -1;
         }
@@ -407,10 +410,8 @@ int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
     for (int j = 0; j < njob; j++) {
         ExpJob *jb = &job[j];
         if (jb->fail) {
-            for (int q = 0; q < njob; q++) {
-                free(job[q].out);
-                free(job[q].scratch);
-            }
+            for (int q = 0; q < njob; q++)
+                free(job[q].out);    /* scratch is borrowed */
             free(latent); free(cur); free(out); free(acc);
             return -1;
         }
@@ -427,10 +428,8 @@ int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
                 acc[i] += wsel[j] * jb->out[i];
         }
     }
-    for (int j = 0; j < njob; j++) {
-        free(job[j].out);
-        free(job[j].scratch);
-    }
+    for (int j = 0; j < njob; j++)
+        free(job[j].out);            /* scratch is borrowed */
 
     /* state = state + W_up * acc */
     int up_ok = 0;

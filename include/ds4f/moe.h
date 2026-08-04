@@ -70,11 +70,16 @@ void ds4f_topk(const float *scores, int E, int k, int *idx, float *w);
 
 /* Real MoE step for layer L. state[hidden] in/out. tr = trunk layer
  * payload; es[j] = cache slot payload for sel[j] (topk, already
- * fetched). scratch holds max_rc floats. Counters accumulate. */
+ * fetched). scratch holds max_rc floats; job_scratch[k] for k in
+ * [0, topk) holds another max_rc floats each, allocated ONCE by the
+ * caller (the parallel expert chains must not malloc per call --
+ * fresh mmap'd scratch page-faults ~16 MB x topk x layers). Counters
+ * accumulate. */
 int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
                   const uint8_t *tr, const Ds4fPoolLayout *pl,
                   const uint8_t *const *es, const int *sel, const float *wsel,
                   float *state, float *scratch, long scratch_n,
+                  float *const *job_scratch,
                   int64_t *n_matvec, int64_t *n_decode);
 
 #endif /* DS4F_MOE_H */
