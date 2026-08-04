@@ -29,7 +29,14 @@ static int dtype_of(const char *s, size_t n) {
     if (n == 3 && !memcmp(s, "F32", 3)) return 0;
     if (n == 2 && !memcmp(s, "I8", 2)) return 1;
     if (n == 8 && !memcmp(s, "F8_E4M3", 8)) return 2;
+    if (n == 4 && !memcmp(s, "BF16", 4)) return 4;
     return 3;
+}
+
+/* name ends with suffix (NUL-terminated C strings) */
+static int name_ends(const char *name, const char *suffix) {
+    size_t nl = strlen(name), sl = strlen(suffix);
+    return nl >= sl && !memcmp(name + nl - sl, suffix, sl);
 }
 
 int ds4f_pool_layout_load(Ds4fPoolLayout *pl, const char *path,
@@ -148,8 +155,10 @@ int ds4f_trunk_layout_load(Ds4fTrunkLayout *tl, const char *path) {
         json_free(doc); free(buf);
         return -1;
     }
-    for (int L = 0; L < DS4F_MAX_LAYERS; L++)
+    for (int L = 0; L < DS4F_MAX_LAYERS; L++) {
         tl->gate[L] = tl->down[L] = tl->up[L] = -1;
+        tl->gate_bias[L] = -1;
+    }
 
     int total = 0;
     for (int i = 0; i < ls->nchild; i++) {
@@ -226,16 +235,23 @@ int ds4f_trunk_layout_load(Ds4fTrunkLayout *tl, const char *path) {
             }
             if (of) tt->off = of->inum;
             if (nb) tt->nbytes = nb->inum;
-            /* roles: only fp32 tensors can drive the real path today */
-            if (tt->dtype == 0 && tt->name[0]) {
-                if (strstr(tt->name, ".ffn.gate") ||
-                    strstr(tt->name, "gate.weight")) {
+            /* roles: exact ffn leaf names only. The gate weight is BF16
+             * on the real checkpoint with an F32 bias; down/up are the
+             * latent projections (fp32 when present). Match the leaf
+             * exactly so attn.*.wgate.weight can never impersonate the
+             * ffn router. */
+            if (tt->name[0]) {
+                if (name_ends(tt->name, ".ffn.gate.weight") &&
+                    (tt->dtype == 0 || tt->dtype == 4)) {
                     if (tl->gate[L] < 0) tl->gate[L] = k - 1;
-                } else if (strstr(tt->name, ".ffn.down") ||
-                           strstr(tt->name, "down_proj")) {
+                } else if (name_ends(tt->name, ".ffn.gate.bias") &&
+                           tt->dtype == 0) {
+                    if (tl->gate_bias[L] < 0) tl->gate_bias[L] = k - 1;
+                } else if (name_ends(tt->name, ".ffn.down.weight") &&
+                           tt->dtype == 0) {
                     if (tl->down[L] < 0) tl->down[L] = k - 1;
-                } else if (strstr(tt->name, ".ffn.up") ||
-                           strstr(tt->name, "up_proj")) {
+                } else if (name_ends(tt->name, ".ffn.up.weight") &&
+                           tt->dtype == 0) {
                     if (tl->up[L] < 0) tl->up[L] = k - 1;
                 }
             }

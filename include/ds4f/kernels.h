@@ -43,4 +43,9 @@ void ds4f_router_scores(const float *W, const float *bias, int E, int H,
 void ds4f_f32_matvec(const float *W, int R, int C, const float *x,
                      float *y);
 
+/* BF16 matvec: W is brain-float16 (truncated fp32), decoded on the fly.
+ * scores[r] = sum_c W[r,c] * x[c] (+ bias[r] when given). */
+void ds4f_bf16_matvec(const uint16_t *W, int R, int C, const float *x,
+                      const float *bias, float *y);
+
 #endif /* DS4F_KERNELS_H */

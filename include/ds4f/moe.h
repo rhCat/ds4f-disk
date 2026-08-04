@@ -44,7 +44,7 @@ int ds4f_pool_layout_load(Ds4fPoolLayout *pl, const char *path,
 
 typedef struct Ds4fTrunkTensor {
     char name[96];
-    int  dtype;                 /* 0=F32, 1=I8, 2=F8_E4M3, 3=other */
+    int  dtype;                 /* 0=F32, 1=I8, 2=F8_E4M3, 4=BF16, 3=other */
     long dims[4];
     int  rank;
     long off;                   /* relative to layer payload start */
@@ -56,6 +56,7 @@ typedef struct Ds4fTrunkLayout {
     Ds4fTrunkTensor *t;         /* flat, layer-major */
     int  *t_off;                /* [n_layers+1] index into t */
     int   gate[DS4F_MAX_LAYERS]; /* tensor idx or -1 */
+    int   gate_bias[DS4F_MAX_LAYERS];
     int   down[DS4F_MAX_LAYERS];
     int   up[DS4F_MAX_LAYERS];
 } Ds4fTrunkLayout;

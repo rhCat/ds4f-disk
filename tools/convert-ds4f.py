@@ -533,7 +533,8 @@ def cmd_make_synthetic(dirpath):
             f"layers.{L}.attn.attn_sink",
             f"layers.{L}.attn.wq_a.weight",
             f"layers.{L}.attn.wq_a.scale",
-            f"layers.{L}.ffn.gate",
+            f"layers.{L}.ffn.gate.weight",
+            f"layers.{L}.ffn.gate.bias",
             f"layers.{L}.ffn.down",
             f"layers.{L}.ffn.up",
             f"layers.{L}.ffn.shared_experts.w1.weight",
@@ -574,6 +575,15 @@ def cmd_make_synthetic(dirpath):
                 x = (x * 1103515245 + 12345) & 0x7FFFFFFF
                 out.append(((x & 0x7) - 4) & 0xFF)
             return bytes(out)
+        if dtype == "BF16":            # small bf16 weights in [-1, 1]
+            out = bytearray()
+            x = 0x1234
+            for i in range(n // 2):
+                x = (x * 1103515245 + 12345) & 0x7FFFFFFF
+                v = ((x & 0xFFFF) / 65535.0 - 0.5) * 2.0   # [-1, 1]
+                f32 = struct.unpack("<I", struct.pack("<f", v))[0]
+                out += struct.pack("<H", (f32 >> 16) & 0xFFFF)
+            return bytes(out)
         x = 0x1234
         out = bytearray()
         for i in range(n):
@@ -589,8 +599,10 @@ def cmd_make_synthetic(dirpath):
                 sizes[name] = {1: 8, 2: 16, 3: 8}[w]    # block16 scales
             else:
                 sizes[name] = {1: 128, 2: 256, 3: 128}[w]  # I8, 2-D
-        elif name.endswith("ffn.gate"):
-            sizes[name] = 128            # [4 x 8] F32
+        elif name.endswith("ffn.gate.weight"):
+            sizes[name] = 64             # [4 x 8] BF16 (2 B/elem)
+        elif name.endswith("ffn.gate.bias"):
+            sizes[name] = 16             # [4] F32
         elif name.endswith("ffn.down"):
             sizes[name] = 256            # [8 x 8] F32
         elif name.endswith("ffn.up"):
@@ -607,7 +619,8 @@ def cmd_make_synthetic(dirpath):
     # 2-D shapes so the engine's matvec chain has real dims
     shape_of = {}
     for L in range(2):
-        shape_of[f"layers.{L}.ffn.gate"] = [4, 8]
+        shape_of[f"layers.{L}.ffn.gate.weight"] = [4, 8]
+        shape_of[f"layers.{L}.ffn.gate.bias"] = [4]
         shape_of[f"layers.{L}.ffn.down"] = [8, 8]
         shape_of[f"layers.{L}.ffn.up"] = [8, 8]
         for e in range(4):
@@ -626,6 +639,8 @@ def cmd_make_synthetic(dirpath):
                 dt, n = "F8_E8M0", sizes[name]  # real ckpt: E8M0 per-16 scales
             elif name.endswith(".scale"):
                 dt, n = "F32", 1
+            elif name.endswith("ffn.gate.weight"):
+                dt, n = "BF16", sizes[name] // 2  # real ckpt: BF16 router
             elif ".weight" in name and ("experts" in name
                                         or "shared_experts" in name):
                 dt, n = "I8", sizes[name]   # real checkpoint: I8 + scales

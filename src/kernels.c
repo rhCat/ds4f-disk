@@ -2,6 +2,7 @@
 #include "ds4f/kernels.h"
 
 #include <math.h>
+#include <string.h>
 
 float ds4f_e8m0_value(uint8_t b) {
     return ldexpf(1.0f, (int)b - 127);   /* b = 0 -> 2^-127 */
@@ -52,5 +53,22 @@ void ds4f_f32_matvec(const float *W, int R, int C, const float *x,
         const float *wr = W + (size_t)r * C;
         for (int c = 0; c < C; c++) acc += wr[c] * x[c];
         y[r] = acc;
+    }
+}
+
+static float bf16_to_f32(uint16_t h) {
+    uint32_t bits = (uint32_t)h << 16;   /* bf16 = top half of fp32 */
+    float f;
+    memcpy(&f, &bits, sizeof f);
+    return f;
+}
+
+void ds4f_bf16_matvec(const uint16_t *W, int R, int C, const float *x,
+                      const float *bias, float *y) {
+    for (int r = 0; r < R; r++) {
+        float acc = 0.0f;
+        const uint16_t *wr = W + (size_t)r * C;
+        for (int c = 0; c < C; c++) acc += bf16_to_f32(wr[c]) * x[c];
+        y[r] = acc + (bias ? bias[r] : 0.0f);
     }
 }

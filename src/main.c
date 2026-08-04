@@ -225,9 +225,19 @@ int main(int argc, char **argv) {
             if (use_real) {
                 const Ds4fTrunkTensor *gt = &tl.t[tl.gate[L]];
                 float scores[256];
-                ds4f_router_scores(
-                    (const float *)(const void *)(tr + gt->off), NULL,
-                    cfg.n_experts, cfg.hidden, state, scores);
+                const float *gbias = NULL;
+                if (tl.gate_bias[L] >= 0) {
+                    const Ds4fTrunkTensor *bt = &tl.t[tl.gate_bias[L]];
+                    gbias = (const float *)(const void *)(tr + bt->off);
+                }
+                if (gt->dtype == 4)      /* BF16 */
+                    ds4f_bf16_matvec(
+                        (const uint16_t *)(const void *)(tr + gt->off),
+                        cfg.n_experts, cfg.hidden, state, gbias, scores);
+                else                     /* F32 */
+                    ds4f_router_scores(
+                        (const float *)(const void *)(tr + gt->off), gbias,
+                        cfg.n_experts, cfg.hidden, state, scores);
                 ds4f_topk(scores, cfg.n_experts, cfg.topk, idx, w);
             } else {
                 ds4f_router(idx, w, &cfg, hstate, L, locality);
