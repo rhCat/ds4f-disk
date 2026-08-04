@@ -13,6 +13,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -403,6 +404,14 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "[dbg3] t%d L%d attn state[0..1] %08x %08x\n",
                         t, L, u0, u1);
             }
+            if (getenv("DS4F_DEBUG6")) {
+                double s2 = 0.0;
+                long n = (long)cfg.hidden * mhc_streams;
+                for (long i = 0; i < n; i++)
+                    s2 += (double)state[i] * state[i];
+                fprintf(stderr, "[dbg6] t%d L%d rms=%.6g after attn\n",
+                        t, L, sqrt(s2 / (double)n));
+            }
             if (use_real) {
                 const Ds4fTrunkTensor *gt = &tl.t[tl.gate[L]];
                 const float *gbias = NULL;
@@ -483,12 +492,20 @@ int main(int argc, char **argv) {
                     fprintf(stderr, "moe step failed at layer %d\n", L);
                     return 2;
                 }
+                if (getenv("DS4F_DEBUG6")) {
+                    double s2 = 0.0;
+                    long n = (long)cfg.hidden * mhc_streams;
+                    for (long i = 0; i < n; i++)
+                        s2 += (double)state[i] * state[i];
+                    fprintf(stderr, "[dbg6] t%d L%d rms=%.6g after ffn\n",
+                            t, L, sqrt(s2 / (double)n));
+                }
                 if (getenv("DS4F_DEBUG2")) {
                     uint64_t ck = ds4f_mix64(0);
                     for (int i = 0; i < cfg.hidden; i++)
                         ck = ds4f_mix64(ck ^ (uint64_t)(state[i] * 1e6f));
-                    fprintf(stderr, "[dbg2] t%d L%d after moe  %016llx\n", t, L,
-                            (unsigned long long)ck);
+                    fprintf(stderr, "[dbg2] t%d L%d after moe  %016llx\n",
+                            t, L, (unsigned long long)ck);
                 }
             } else {
                 for (int j = 0; j < cfg.topk; j++) {
