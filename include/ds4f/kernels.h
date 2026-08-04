@@ -48,4 +48,11 @@ void ds4f_f32_matvec(const float *W, int R, int C, const float *x,
 void ds4f_bf16_matvec(const uint16_t *W, int R, int C, const float *x,
                       const float *bias, float *y);
 
+/* SIMD dispatch (issue #5): when enabled AND available, mxfp4 decode /
+ * matvec / bf16 matvec route to the NEON or AVX2 path. Decode stays
+ * bit-identical; matvec accumulates in lane order (tolerance-verified).
+ * Default: enabled. */
+void ds4f_kernels_set_simd(int on);
+int  ds4f_kernels_simd(void);
+
 #endif /* DS4F_KERNELS_H */

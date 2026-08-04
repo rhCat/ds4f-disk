@@ -37,7 +37,9 @@ static void usage(const char *argv0) {
         "  --trace FILE        write (layer,expert) request log\n"
         "  --threads N         parallel expert-read threads    (default 4)\n"
         "  --preset NAME       laptop | server                 (default laptop)\n"
-        "  --no-refuse         start even if the plan says no\n",
+        "  --no-refuse         start even if the plan says no\n"
+        "  --no-simd           force scalar kernels (default: SIMD when "
+        "available)\n",
         argv0);
 }
 
@@ -75,6 +77,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--layout-pool") && i + 1 < argc) pl_path = argv[++i];
         else if (!strcmp(argv[i], "--dump-state") && i + 1 < argc) dump_path = argv[++i];
         else if (!strcmp(argv[i], "--no-refuse")) refuse = 0;
+        else if (!strcmp(argv[i], "--no-simd")) ds4f_kernels_set_simd(0);
         else if (!model_dir) model_dir = argv[i];
         else { usage(argv[0]); return 1; }
     }
@@ -299,7 +302,7 @@ int main(int argc, char **argv) {
             "%d tokens in %.1f s, %.2f s/token\n"
             "GB read per token: %.2f  (trunk %lld MB, experts %lld MB)\n"
             "cache: %lld requests, %lld hits (%.1f%%), %lld dropped\n"
-            "%s"
+            "%s%s"
             "PEAK RSS: %.2f GB (measured, not the forecast)\n",
             cfg.n_layers, cfg.n_experts, cfg.topk, (long long)cfg.expert_nbytes,
             pool_src,
@@ -312,6 +315,7 @@ int main(int argc, char **argv) {
             (long long)cache.nreq, (long long)cache.nhit, hit * 100.0,
             (long long)cache.ndrop,
             moe_mode ? "moe: real matvec compute (kernels)\n" : "",
+            ds4f_kernels_simd() ? "kernels: simd\n" : "kernels: scalar\n",
             (double)ds4f_peak_rss() / 1e9);
 
     int rc = 0;

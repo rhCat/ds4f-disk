@@ -25,7 +25,7 @@ for t in tests/test_*.c; do
     name="$(basename "$t" .c)"
     $CC $CFLAGS -o "build/$name" "$t" \
         src/cfg.c src/st.c src/trunk.c src/cache.c src/router.c src/mem.c \
-        src/kernels.c src/moe.c -lm
+        src/kernels.c src/moe.c src/simd.c -lm
     run "$name" "build/$name"
 done
 

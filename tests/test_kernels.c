@@ -2,6 +2,7 @@
  * decode exactness on known vectors, encode->decode round trip,
  * matvec vs naive dequant+dot, router scores vs naive dot. */
 #include "ds4f/kernels.h"
+#include "ds4f/simd.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -121,7 +122,9 @@ int main(void) {
             for (int c = 0; c < C; c++) acc += scr[(size_t)r * C + c] * x[c];
             want[r] = acc;
         }
+        ds4f_kernels_set_simd(0);       /* exact order match => scalar */
         ds4f_mxfp4_matvec(vals, scales, R, C, bsize, x, got, scr);
+        ds4f_kernels_set_simd(1);
         for (int r = 0; r < R; r++) {
             if (got[r] != want[r]) {
                 fprintf(stderr, "matvec mismatch row %d: %g vs %g\n",
@@ -155,6 +158,100 @@ int main(void) {
             }
         }
         free(W); free(bias); free(x); free(got);
+    }
+
+    /* 6: SIMD decode must be BIT-IDENTICAL to scalar (issue #5).
+     * Random data, both block sizes, odd lengths to hit the tails. */
+    if (ds4f_simd_available()) {
+        for (int bsize = 16; bsize <= 32; bsize *= 2) {
+            for (int trial = 0; trial < 4; trial++) {
+                int n = 100 + trial * 37;
+                uint8_t *vals = (uint8_t *)malloc((size_t)(n + 1) / 2);
+                uint8_t *scales = (uint8_t *)malloc(
+                    (size_t)((n + bsize - 1) / bsize));
+                for (int i = 0; i < (n + 1) / 2; i++)
+                    vals[i] = (uint8_t)((i * 131 + 17) & 0xFF);
+                for (int i = 0; i < (n + bsize - 1) / bsize; i++)
+                    scales[i] = (uint8_t)(110 + (i * 7) % 30);
+                float *a = (float *)malloc((size_t)n * sizeof(float));
+                float *b = (float *)malloc((size_t)n * sizeof(float));
+                ds4f_kernels_set_simd(0);
+                ds4f_mxfp4_decode(vals, scales, n, bsize, a);
+                ds4f_kernels_set_simd(1);
+                ds4f_mxfp4_decode(vals, scales, n, bsize, b);
+                for (int i = 0; i < n; i++) {
+                    if (a[i] != b[i]) {   /* bit-identical, no tolerance */
+                        fprintf(stderr, "simd decode mismatch i=%d bsize=%d "
+                                "n=%d: %g vs %g\n", i, bsize, n, a[i], b[i]);
+                        return 1;
+                    }
+                }
+                free(vals); free(scales); free(a); free(b);
+            }
+        }
+
+        /* 7: SIMD matvec within fp32 lane-order tolerance vs scalar */
+        {
+            int R = 9, C = 200, bsize = 32;
+            float *W = (float *)malloc((size_t)(R * C) * sizeof(float));
+            float *x = (float *)malloc((size_t)C * sizeof(float));
+            float *want = (float *)malloc((size_t)R * sizeof(float));
+            float *got = (float *)malloc((size_t)R * sizeof(float));
+            float *scr = (float *)malloc((size_t)(R * C) * sizeof(float));
+            uint8_t *vals = (uint8_t *)calloc((size_t)(R * C + 1) / 2, 1);
+            uint8_t *scales = (uint8_t *)calloc(
+                (size_t)((R * C + bsize - 1) / bsize), 1);
+            for (int i = 0; i < R * C; i++)
+                W[i] = (float)(((i * 13 + 5) % 240) - 120) * 0.02f;
+            for (int c = 0; c < C; c++)
+                x[c] = (float)((c * 7) % 9 - 4) * 0.1f;
+            encode(W, R * C, bsize, vals, scales);
+            ds4f_kernels_set_simd(0);
+            ds4f_mxfp4_matvec(vals, scales, R, C, bsize, x, want, scr);
+            ds4f_kernels_set_simd(1);
+            ds4f_mxfp4_matvec(vals, scales, R, C, bsize, x, got, scr);
+            for (int r = 0; r < R; r++) {
+                float d = fabsf(got[r] - want[r]);
+                float scale = fabsf(want[r]) > 1e-6f ? fabsf(want[r]) : 1.0f;
+                if (d > scale * 1e-5f) {
+                    fprintf(stderr, "simd matvec row %d: %g vs %g "
+                            "(rel %g)\n", r, got[r], want[r], d / scale);
+                    return 1;
+                }
+            }
+            free(W); free(x); free(want); free(got); free(scr);
+            free(vals); free(scales);
+        }
+
+        /* 8: SIMD bf16 matvec tolerance vs scalar */
+        {
+            int R = 6, C = 150;
+            uint16_t *W = (uint16_t *)malloc((size_t)(R * C) * 2);
+            float *x = (float *)malloc((size_t)C * sizeof(float));
+            float *want = (float *)malloc((size_t)R * sizeof(float));
+            float *got = (float *)malloc((size_t)R * sizeof(float));
+            for (int i = 0; i < R * C; i++) {
+                uint32_t bits = (uint32_t)((i * 7 % 200) - 100) << 16;
+                W[i] = (uint16_t)(bits >> 16);
+            }
+            for (int c = 0; c < C; c++)
+                x[c] = (float)((c % 6) - 3) * 0.2f;
+            ds4f_kernels_set_simd(0);
+            ds4f_bf16_matvec(W, R, C, x, NULL, want);
+            ds4f_kernels_set_simd(1);
+            ds4f_bf16_matvec(W, R, C, x, NULL, got);
+            for (int r = 0; r < R; r++) {
+                float d = fabsf(got[r] - want[r]);
+                float scale = fabsf(want[r]) > 1e-6f ? fabsf(want[r]) : 1.0f;
+                if (d > scale * 1e-5f) {
+                    fprintf(stderr, "simd bf16 row %d: %g vs %g\n",
+                            r, got[r], want[r]);
+                    return 1;
+                }
+            }
+            free(W); free(x); free(want); free(got);
+        }
+        ds4f_kernels_set_simd(1);
     }
 
     return 0;
