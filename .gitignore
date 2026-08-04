@@ -1,0 +1,9 @@
+build/
+ds4f
+pack-trunk
+make-fixture
+*.o
+*.csv
+*.log
+fixtures/
+model.artifacts/
