@@ -25,6 +25,7 @@ static void usage(const char *argv0) {
         "  --nring N           trunk ring slots, >= 2          (default 2)\n"
         "  --gen N             tokens to generate              (default 4)\n"
         "  --prompt S          seed string for hidden state    (default \"ds4f\")\n"
+        "  --locality F        router popularity boost, 0..1   (default 0)\n"
         "  --trace FILE        write (layer,expert) request log\n"
         "  --threads N         parallel expert-read threads    (default 4)\n"
         "  --preset NAME       laptop | server                 (default laptop)\n"
@@ -41,7 +42,7 @@ static double now_s(void) {
 int main(int argc, char **argv) {
     const char *model_dir = NULL, *trunk_path = NULL, *off_path = NULL;
     const char *trace_path = NULL, *prompt = "ds4f";
-    double cache_gb = 8.0, trunk_gb = 4.0;
+    double cache_gb = 8.0, trunk_gb = 4.0, locality = 0.0;
     int pin_layers = -1, nring = 2, gen = 4, threads = 4, refuse = 1;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--preset")) {
@@ -55,6 +56,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--nring") && i + 1 < argc) nring = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--gen") && i + 1 < argc) gen = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--prompt") && i + 1 < argc) prompt = argv[++i];
+        else if (!strcmp(argv[i], "--locality") && i + 1 < argc) locality = atof(argv[++i]);
         else if (!strcmp(argv[i], "--trace") && i + 1 < argc) trace_path = argv[++i];
         else if (!strcmp(argv[i], "--threads") && i + 1 < argc) threads = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--trunk") && i + 1 < argc) trunk_path = argv[++i];
@@ -147,7 +149,7 @@ int main(int argc, char **argv) {
             if (!tr) { fprintf(stderr, "trunk bind failed at layer %d\n", L); return 2; }
             state = ds4f_mix64(state ^ ds4f_checksum(tr, trunk.lay[L].nbytes));
 
-            ds4f_router(idx, w, &cfg, state, L);
+            ds4f_router(idx, w, &cfg, state, L, locality);
             ds4f_cache_getmany(&cache, L, idx, cfg.topk, slots);
             for (int j = 0; j < cfg.topk; j++) {
                 const uint8_t *es = ds4f_cache_slot(&cache, slots[j]);

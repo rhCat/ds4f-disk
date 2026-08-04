@@ -19,8 +19,8 @@ int main(void) {
     float w[4], w2[4];
     uint64_t state = UINT64_C(0xDEADBEEF);
     int layer = 3;
-    ds4f_router(idx, w, &cfg, state, layer);
-    ds4f_router(idx2, w2, &cfg, state, layer);
+    ds4f_router(idx, w, &cfg, state, layer, 0.0);
+    ds4f_router(idx2, w2, &cfg, state, layer, 0.0);
 
     if (memcmp(idx, idx2, sizeof idx) != 0 || memcmp(w, w2, sizeof w) != 0) {
         fprintf(stderr, "router not deterministic\n");

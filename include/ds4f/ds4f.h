@@ -199,9 +199,13 @@ void ds4f_cache_pin(Ds4fCache *c, int slot, int pin);
 
 /* In fixture mode the score is a deterministic hash of (state, layer,
  * expert); with real weights this becomes a dot product against the
- * resident router matrix. The invariant is the split, not the source. */
+ * resident router matrix. The invariant is the split, not the source.
+ * locality > 0 boosts SELECTION toward a fixed popular set (experts
+ * 0..63 per layer), which creates temporal reuse in the fixture so the
+ * cache sweep shows policy-vs-capacity separation. The boost touches
+ * ch only -- sc stays the unbiased score. */
 void ds4f_router(int *idx, float *w, const Ds4fCfg *cfg,
-                 uint64_t state, int layer);
+                 uint64_t state, int layer, double locality);
 
 /* ------------------------------------------------------------------ */
 /* memory planner                                                     */

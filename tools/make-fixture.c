@@ -88,23 +88,33 @@ int main(int argc, char **argv) {
     /* model.safetensors: 8-byte LE header length, JSON header, payload.
      * Expert "e.{layer}.{expert}" lives at layer-major expert-minor
      * offset, each expert_bytes long -- fixed-rate, O(1) addressable. */
-    size_t cap = (size_t)n_layers * (size_t)n_experts * 64 + 4096;
+    size_t cap = 4096;
     char *hdr = (char *)malloc(cap);
     if (!hdr) return 1;
     size_t hl = 0;
-    hl += (size_t)snprintf(hdr + hl, cap - hl, "{");
+#define APPEND(...) do {                                                \
+        int need = snprintf(NULL, 0, __VA_ARGS__);                      \
+        if (need < 0 || hl + (size_t)need + 1 > cap) {                  \
+            while (hl + (size_t)need + 1 > cap) cap *= 2;               \
+            char *nh = (char *)realloc(hdr, cap);                       \
+            if (!nh) return 1;                                          \
+            hdr = nh;                                                   \
+        }                                                               \
+        hl += (size_t)snprintf(hdr + hl, cap - hl, __VA_ARGS__);        \
+    } while (0)
+    APPEND("{");
     for (int L = 0; L < n_layers; L++) {
         for (int e = 0; e < n_experts; e++) {
             long long a = (long long)L * n_experts * expert_bytes +
                           (long long)e * expert_bytes;
-            hl += (size_t)snprintf(hdr + hl, cap - hl,
-                "%s\"e.%d.%d\":{\"dtype\":\"U8\",\"shape\":[%lld],"
-                "\"data_offsets\":[%lld,%lld]}",
-                (L == 0 && e == 0) ? "" : ",",
-                L, e, (long long)expert_bytes, a, a + (long long)expert_bytes);
+            APPEND("%s\"e.%d.%d\":{\"dtype\":\"U8\",\"shape\":[%lld],"
+                   "\"data_offsets\":[%lld,%lld]}",
+                   (L == 0 && e == 0) ? "" : ",",
+                   L, e, (long long)expert_bytes, a, a + (long long)expert_bytes);
         }
     }
-    hl += (size_t)snprintf(hdr + hl, cap - hl, "}");
+    APPEND("}");
+#undef APPEND
 
     snprintf(path, sizeof path, "%s/model.safetensors", dir);
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);

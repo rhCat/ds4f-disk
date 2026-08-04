@@ -20,7 +20,7 @@ static uint64_t h3(uint64_t a, uint64_t b, uint64_t c) {
 }
 
 void ds4f_router(int *idx, float *w, const Ds4fCfg *cfg,
-                 uint64_t state, int layer) {
+                 uint64_t state, int layer, double locality) {
     const int E = cfg->n_experts, K = cfg->topk;
     float *sc = (float *)malloc((size_t)E * sizeof(float));
     float *ch = (float *)malloc((size_t)E * sizeof(float));
@@ -31,8 +31,14 @@ void ds4f_router(int *idx, float *w, const Ds4fCfg *cfg,
                      (double)0x1000000;
         double bias = (double)(h3(state ^ UINT64_C(0xB1A5), (uint64_t)layer,
                                   (uint64_t)e) & 0xFFFFFF) / (double)0x1000000;
+        double sel = acc + (bias - 0.5) * 0.1;
+        if (locality > 0.0) {
+            /* popular set: experts 0..63 per layer, popularity falls off */
+            double pop = 1.0 / (1.0 + (double)(e % 64));
+            sel = acc * (1.0 + locality * pop);
+        }
         sc[e] = (float)acc;                 /* UNBIASED score */
-        ch[e] = (float)(acc + (bias - 0.5) * 0.1);  /* SELECTION score */
+        ch[e] = (float)sel;                 /* SELECTION score */
     }
 
     char *taken = (char *)calloc((size_t)E, 1);
