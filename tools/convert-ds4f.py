@@ -579,7 +579,7 @@ def cmd_make_synthetic(dirpath):
                 dt, n = "F32", 1
             elif ".weight" in name and ("experts" in name
                                         or "shared_experts" in name):
-                dt, n = "F8_E4M3", sizes[name]
+                dt, n = "I8", sizes[name]        # real checkpoint: I8 + scales
             else:
                 dt, n = "F32", sizes[name] // 4
             entries[name] = {"dtype": dt, "shape": [n],
@@ -811,8 +811,8 @@ def cmd_quantize(dirpath, outdir, dry_run=False):
             if sc is None:
                 problems.append(f"{name}: no sibling .scale tensor")
                 continue
-            if dt != "F8_E4M3":
-                problems.append(f"{name}: dtype {dt}, expected F8_E4M3")
+            if dt not in ("F8_E4M3", "I8"):
+                problems.append(f"{name}: dtype {dt}, expected F8_E4M3 or I8")
                 continue
             wdata, _, _ = read(name)
             sdata, sdt, sshp = read(sc_name)
@@ -830,15 +830,15 @@ def cmd_quantize(dirpath, outdir, dry_run=False):
                 continue
             schemes[name] = scheme
             layout.append((name, shp, (n + 1) // 2, (n + 31) // 32,
-                           (n + 31) // 32, scheme))
+                           (n + 31) // 32, scheme, dt))
         layouts[(L, e)] = layout
 
     if dry_run:
         sample = next(iter(layouts.values()))
         print(f"expert weight tensors: {len(layouts)} experts, "
               f"{len(sample)} tensors each")
-        for (name, shp, vnb, snb, blk, scheme) in sample:
-            print(f"  {name}: shape {shp}, scheme={scheme}, "
+        for (name, shp, vnb, snb, blk, scheme, dt) in sample:
+            print(f"  {name}: dtype {dt}, shape {shp}, scheme={scheme}, "
                   f"values {vnb} B, block scales {snb} B ({blk} blocks)")
         cnt = {}
         for s in schemes.values():
@@ -848,7 +848,7 @@ def cmd_quantize(dirpath, outdir, dry_run=False):
             print(f"PROBLEMS ({len(problems)}):")
             for p in problems[:10]:
                 print(f"  {p}")
-        est = sum(vnb + snb for _, _, vnb, snb, _, _ in
+        est = sum(vnb + snb for _, _, vnb, snb, _, _, _ in
                   next(iter(layouts.values()))) * len(layouts)
         print(f"estimated mxfp4 pool: {hsize(est)} "
               f"(blocks of 32, E8M0 scales, values 2/byte)")
@@ -865,10 +865,10 @@ def cmd_quantize(dirpath, outdir, dry_run=False):
               "very slow on the real pool. Install numpy on the box.")
 
     # expert slot size is computable from shapes alone (fixed-rate)
-    slot = sum(vnb + snb for _, _, vnb, snb, _, _ in
+    slot = sum(vnb + snb for _, _, vnb, snb, _, _, _ in
                next(iter(layouts.values())))
     for (L, e), layout in layouts.items():
-        s = sum(vnb + snb for _, _, vnb, snb, _, _ in layout)
+        s = sum(vnb + snb for _, _, vnb, snb, _, _, _ in layout)
         if s != slot:
             print(f"REFUSE: expert ({L},{e}) slot {s} != {slot}")
             sys.exit(1)
@@ -886,13 +886,16 @@ def cmd_quantize(dirpath, outdir, dry_run=False):
     g_max, g_rms2, g_n = 0.0, 0.0, 0
     for (L, e) in sorted(experts):
         layout = layouts[(L, e)]
-        for (name, shp, vnb, snb, blk, scheme) in layout:
+        for (name, shp, vnb, snb, blk, scheme, dt) in layout:
             wdata, _, _ = read(name)
             sdata, _, _ = read(name[:-len(".weight")] + ".scale")
             n = numel(shp)
             if _np is not None:
-                raw = _np.frombuffer(wdata, _np.uint8)
-                vals = FP8_LUT_NP[raw].astype(_np.float32)
+                if dt == "I8":
+                    vals = _np.frombuffer(wdata, _np.int8).astype(_np.float32)
+                else:
+                    raw = _np.frombuffer(wdata, _np.uint8)
+                    vals = FP8_LUT_NP[raw].astype(_np.float32)
                 if scheme == "tensor":
                     vals = vals * struct.unpack("<f", sdata[:4])[0]
                 else:
@@ -901,7 +904,11 @@ def cmd_quantize(dirpath, outdir, dry_run=False):
                     vals = (vals.reshape(R, C) * sc[:, None]).reshape(-1)
                 vb, sbb, st = quantize_ndarray(vals)
             else:
-                vals = [FP8_LUT[b] for b in wdata]
+                if dt == "I8":
+                    vals = [int.from_bytes(wdata[i:i + 1], "little",
+                                           signed=True) for i in range(n)]
+                else:
+                    vals = [FP8_LUT[b] for b in wdata]
                 if scheme == "tensor":
                     s = struct.unpack("<f", sdata[:4])[0]
                     vals = [v * s for v in vals]
