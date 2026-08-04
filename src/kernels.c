@@ -91,3 +91,41 @@ void ds4f_bf16_matvec(const uint16_t *W, int R, int C, const float *x,
         y[r] = acc + (bias ? bias[r] : 0.0f);
     }
 }
+
+/* fp8_e4m3fn decode table (issue #6); e=0 subnormal-ish, e=15 clamp. */
+static float fp8_lut[256];
+static int  fp8_lut_ready = 0;
+
+static void fp8_lut_build(void) {
+    for (int b = 0; b < 256; b++) {
+        int s = (b >> 7) & 1, e = (b >> 3) & 0xF, m = b & 7;
+        float v;
+        if (e == 0)
+            v = (float)m * 0.001953125f;         /* m * 2^-9 */
+        else if (e == 0xF)
+            v = 448.0f;                          /* inf/nan -> E4M3FN max */
+        else
+            v = (1.0f + (float)m / 8.0f) * ldexpf(1.0f, e - 7);
+        fp8_lut[b] = s ? -v : v;
+    }
+    fp8_lut_ready = 1;   /* benign race: identical values either way */
+}
+
+void ds4f_f8_matvec(const uint8_t *W, const uint8_t *scales,
+                    int R, int C, int SR, int SC, const float *x,
+                    float *y) {
+    if (!fp8_lut_ready) fp8_lut_build();
+    if (SR < 1) SR = 1;
+    if (SC < 1) SC = 1;
+    for (int r = 0; r < R; r++) {
+        float acc = 0.0f;
+        int sr = (int)(((int64_t)r * SR) / R);      /* row block */
+        const uint8_t *wr = W + (size_t)r * C;
+        for (int c = 0; c < C; c++) {
+            int sc = (int)(((int64_t)c * SC) / C);  /* col block */
+            float s = ds4f_e8m0_value(scales[sr * SC + sc]);
+            acc += fp8_lut[wr[c]] * s * x[c];
+        }
+        y[r] = acc;
+    }
+}

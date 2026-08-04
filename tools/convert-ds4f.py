@@ -525,14 +525,24 @@ def cmd_make_synthetic(dirpath):
     with open(os.path.join(dirpath, "config.json"), "w") as f:
         json.dump(cfg, f, indent=2)
 
-    names = ["embed.weight", "lm_head.weight"]
+    names = ["embed.weight", "head.weight", "head.scale"]
     for L in range(2):
         names += [
             f"layers.{L}.hc_attn_base",
             f"layers.{L}.hc_ffn_base",
             f"layers.{L}.attn.attn_sink",
+            f"layers.{L}.attn.q_norm.weight",
+            f"layers.{L}.attn.kv_norm.weight",
             f"layers.{L}.attn.wq_a.weight",
             f"layers.{L}.attn.wq_a.scale",
+            f"layers.{L}.attn.wkv.weight",
+            f"layers.{L}.attn.wkv.scale",
+            f"layers.{L}.attn.wo_a.weight",
+            f"layers.{L}.attn.wo_a.scale",
+            f"layers.{L}.attn.wo_b.weight",
+            f"layers.{L}.attn.wo_b.scale",
+            f"layers.{L}.attn.wo_c.weight",
+            f"layers.{L}.attn.wo_c.scale",
             f"layers.{L}.ffn.gate.weight",
             f"layers.{L}.ffn.gate.bias",
             f"layers.{L}.ffn.down",
@@ -612,13 +622,37 @@ def cmd_make_synthetic(dirpath):
         elif "shared_experts" in name:
             sizes[name] = 24
         elif "embed" in name:
-            sizes[name] = 96
+            sizes[name] = 2048           # [64 x 8] F32
+        elif name == "head.weight":
+            sizes[name] = 512            # [8 x 64] F8_E4M3
+        elif name == "head.scale":
+            sizes[name] = 1              # [1 x 1] F8_E8M0
+        elif name.endswith("q_norm.weight") or name.endswith("kv_norm.weight"):
+            sizes[name] = 8              # [4] BF16
+        elif "attn." in name and name.endswith(".weight"):
+            w = name.split(".")[-2]
+            sizes[name] = {"wq_a": 32, "wkv": 32, "wo_a": 32,
+                           "wo_b": 64, "wo_c": 32}[w]   # F8, 2-D
+        elif "attn." in name and name.endswith(".scale"):
+            sizes[name] = 1              # [1 x 1] F8_E8M0
         else:
             sizes[name] = 32 + (i % 3) * 16
 
     # 2-D shapes so the engine's matvec chain has real dims
     shape_of = {}
     for L in range(2):
+        shape_of[f"layers.{L}.attn.wq_a.weight"] = [4, 8]
+        shape_of[f"layers.{L}.attn.wq_a.scale"] = [1, 1]
+        shape_of[f"layers.{L}.attn.wkv.weight"] = [4, 8]
+        shape_of[f"layers.{L}.attn.wkv.scale"] = [1, 1]
+        shape_of[f"layers.{L}.attn.wo_a.weight"] = [8, 4]
+        shape_of[f"layers.{L}.attn.wo_a.scale"] = [1, 1]
+        shape_of[f"layers.{L}.attn.wo_b.weight"] = [8, 8]
+        shape_of[f"layers.{L}.attn.wo_b.scale"] = [1, 1]
+        shape_of[f"layers.{L}.attn.wo_c.weight"] = [8, 8]
+        shape_of[f"layers.{L}.attn.wo_c.scale"] = [1, 1]
+        shape_of[f"layers.{L}.attn.q_norm.weight"] = [4]
+        shape_of[f"layers.{L}.attn.kv_norm.weight"] = [4]
         shape_of[f"layers.{L}.ffn.gate.weight"] = [4, 8]
         shape_of[f"layers.{L}.ffn.gate.bias"] = [4]
         shape_of[f"layers.{L}.ffn.down"] = [8, 8]
@@ -627,6 +661,9 @@ def cmd_make_synthetic(dirpath):
             shape_of[f"layers.{L}.ffn.experts.{e}.w1.weight"] = [16, 8]
             shape_of[f"layers.{L}.ffn.experts.{e}.w2.weight"] = [16, 16]
             shape_of[f"layers.{L}.ffn.experts.{e}.w3.weight"] = [8, 16]
+    shape_of["embed.weight"] = [64, 8]
+    shape_of["head.weight"] = [8, 64]
+    shape_of["head.scale"] = [1, 1]
 
     n_shards = 2
     wm = {}
@@ -635,12 +672,19 @@ def cmd_make_synthetic(dirpath):
         payload = b""
         entries = {}
         for name in snames:
-            if name.endswith(".scale") and "experts." in name:
-                dt, n = "F8_E8M0", sizes[name]  # real ckpt: E8M0 per-16 scales
+            if name.endswith(".scale") and ("experts." in name
+                                            or "attn." in name
+                                            or name == "head.scale"):
+                dt, n = "F8_E8M0", sizes[name]  # real ckpt: E8M0 group scales
             elif name.endswith(".scale"):
                 dt, n = "F32", 1
             elif name.endswith("ffn.gate.weight"):
                 dt, n = "BF16", sizes[name] // 2  # real ckpt: BF16 router
+            elif name.endswith("q_norm.weight") or name.endswith("kv_norm.weight"):
+                dt, n = "BF16", sizes[name] // 2  # MLA norms
+            elif name.endswith("head.weight") or (
+                    "attn." in name and name.endswith(".weight")):
+                dt, n = "F8_E4M3", sizes[name]    # attention: F8 + scales
             elif ".weight" in name and ("experts" in name
                                         or "shared_experts" in name):
                 dt, n = "I8", sizes[name]   # real checkpoint: I8 + scales

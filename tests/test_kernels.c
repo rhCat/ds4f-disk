@@ -254,5 +254,26 @@ int main(void) {
         ds4f_kernels_set_simd(1);
     }
 
+    /* 9: F8_E4M3 decode + matvec vs naive (issue #6) */
+    {
+        /* known E4M3 bytes: 0x38=1.0, 0xB8=-1.0, 0x3C=1.5, 0xBC=-1.5,
+         * 0x00=0.0 (scale 1.0 via E8M0 127) */
+        uint8_t W[8] = {0x38, 0xB8, 0x3C, 0xBC, 0x00, 0x38, 0xB8, 0x3C};
+        uint8_t scales[2] = {127, 130};   /* [1x2]: cols 0-1 x1, 2-3 x8 */
+        float x[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+        float want[2], got[2];
+        /* naive row 0, cols 0-1 scale 1, cols 2-3 scale 8 */
+        want[0] = (1.0f*1 + (-1.0f)*2) + (1.5f*3 + (-1.5f)*4) * 8.0f;
+        want[1] = (0.0f*1 + 1.0f*2) + ((-1.0f)*3 + 1.5f*4) * 8.0f;
+        ds4f_f8_matvec(W, scales, 2, 4, 1, 2, x, got);
+        for (int r = 0; r < 2; r++) {
+            if (got[r] != want[r]) {
+                fprintf(stderr, "f8 matvec row %d: %g vs %g\n",
+                        r, got[r], want[r]);
+                return 1;
+            }
+        }
+    }
+
     return 0;
 }

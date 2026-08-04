@@ -48,6 +48,14 @@ void ds4f_f32_matvec(const float *W, int R, int C, const float *x,
 void ds4f_bf16_matvec(const uint16_t *W, int R, int C, const float *x,
                       const float *bias, float *y);
 
+/* F8_E4M3 matvec (issue #6): W is F8 bytes [R x C], E8M0 block scales
+ * [SR x SC]; element (r,c) uses scale[r*SR/R][c*SC/C] (the checkpoint's
+ * per-group scheme). y[r] = sum_c W[r,c] * x[c]. Scalar reference;
+ * SIMD path lands with the attention step. */
+void ds4f_f8_matvec(const uint8_t *W, const uint8_t *scales,
+                    int R, int C, int SR, int SC,
+                    const float *x, float *y);
+
 /* SIMD dispatch (issue #5): when enabled AND available, mxfp4 decode /
  * matvec / bf16 matvec route to the NEON or AVX2 path. Decode stays
  * bit-identical; matvec accumulates in lane order (tolerance-verified).
