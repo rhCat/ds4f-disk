@@ -193,7 +193,7 @@ int main(int argc, char **argv) {
          * (per-call malloc page-faults ~16 MB x topk x layers) */
         jscratch = (float **)calloc((size_t)cfg.topk, sizeof(float *));
         if (!jscratch) { fprintf(stderr, "moe: jscratch alloc failed\n"); return 2; }
-        for (int k = 1; k < cfg.topk; k++) {
+        for (int k = 0; k < cfg.topk - 1; k++) {
             jscratch[k] = (float *)malloc((size_t)scratch_n * sizeof(float));
             if (!jscratch[k]) {
                 fprintf(stderr, "moe: jscratch[%d] alloc failed\n", k);
@@ -350,7 +350,7 @@ int main(int argc, char **argv) {
     free(state);
     free(scratch);
     if (jscratch) {
-        for (int k = 1; k < cfg.topk; k++) free(jscratch[k]);
+        for (int k = 0; k < cfg.topk - 1; k++) free(jscratch[k]);
         free(jscratch);
     }
     ds4f_cache_free(&cache);
