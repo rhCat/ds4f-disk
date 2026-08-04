@@ -4,6 +4,7 @@
 #include "json.h"
 
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -282,6 +283,49 @@ void ds4f_topk(const float *scores, int E, int k, int *idx, float *w) {
     }
 }
 
+/* Parallel expert chain job (issue #5): one per topk expert, run on its
+ * own thread once the slot is resident. Combine stays in selection
+ * order in the caller, so results are bit-identical to the serial path. */
+typedef struct {
+    const Ds4fExpertLayout *el;
+    const uint8_t *slot;
+    const float *latent;
+    float *out;               /* chain result, Lat floats */
+    float *scratch;           /* max_rc floats, private */
+    int Lat, D;
+    long scratch_n;
+    int64_t n_matvec, n_decode;
+    int fail;
+} ExpJob;
+
+static void *exp_run(void *arg) {
+    ExpJob *j = (ExpJob *)arg;
+    float *cur = (float *)malloc((size_t)j->D * sizeof(float));
+    float *tmp = (float *)malloc((size_t)j->D * sizeof(float));
+    if (!cur || !tmp) { free(cur); free(tmp); j->fail = 1; return NULL; }
+    memcpy(cur, j->latent, (size_t)j->Lat * sizeof(float));
+    long clen = j->Lat;
+    for (int ti = 0; ti < j->el->n; ti++) {
+        const Ds4fMoETensor *t = &j->el->t[ti];
+        if (t->rank != 2) continue;
+        long R = t->dims[0], C = t->dims[1];
+        if (C != clen || R > j->D) continue;
+        if (R * C > j->scratch_n) { j->fail = 1; break; }
+        ds4f_mxfp4_matvec(j->slot + t->rel_v, j->slot + t->rel_s,
+                          (int)R, (int)C, t->bsize, cur, tmp,
+                          j->scratch);
+        j->n_matvec++;
+        j->n_decode += R * C;
+        memcpy(cur, tmp, (size_t)R * sizeof(float));
+        clen = R;
+    }
+    long ncopy = j->Lat < clen ? j->Lat : clen;
+    memcpy(j->out, cur, (size_t)ncopy * sizeof(float));
+    free(cur);
+    free(tmp);
+    return NULL;
+}
+
 int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
                   const uint8_t *tr, const Ds4fPoolLayout *pl,
                   const uint8_t *const *es, const int *sel, const float *wsel,
@@ -306,6 +350,8 @@ int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
         free(latent); free(cur); free(out); free(acc);
         return -1;
     }
+    (void)cur;              /* expert chains now run in worker threads */
+    (void)scratch;          /* per-job scratch allocated below */
 
     /* latent = W_down * state (identity when absent / mismatched) */
     int di = tl ? tl->down[L] : -1, ui = tl ? tl->up[L] : -1;
@@ -324,33 +370,66 @@ int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
         for (int i = H; i < Lat; i++) latent[i] = 0.0f;
     }
 
+    /* Parallel expert chains (issue #5): each topk expert's w1->w2->w3
+     * chain is independent once its slot is resident, so run them on
+     * separate threads (up to topk) and combine in j order -- the
+     * combine order is unchanged, so results are bit-identical to the
+     * serial path. */
+    pthread_t th[64];
+    ExpJob job[64];
+    int njob = 0;
     for (int j = 0; j < cfg->topk; j++) {
-        const Ds4fExpertLayout *el =
-            &pl->exp[(size_t)L * pl->n_experts + sel[j]];
         if (!es[j]) continue;
-        const uint8_t *slot = es[j];
-        memcpy(cur, latent, (size_t)Lat * sizeof(float));
-        long clen = Lat;
-        for (int ti = 0; ti < el->n; ti++) {
-            const Ds4fMoETensor *t = &el->t[ti];
-            if (t->rank != 2) continue;
-            long R = t->dims[0], C = t->dims[1];
-            if (C != clen || R > D) continue;
-            if (R * C > scratch_n) {
-                fprintf(stderr, "moe: scratch too small (need %ld, have %ld)\n",
-                        R * C, scratch_n);
-                free(latent); free(cur); free(out); free(acc);
-                return -1;
-            }
-            ds4f_mxfp4_matvec(slot + t->rel_v, slot + t->rel_s,
-                              (int)R, (int)C, t->bsize, cur, out, scratch);
-            (*n_matvec)++;
-            (*n_decode) += R * C;
-            memcpy(cur, out, (size_t)R * sizeof(float));
-            clen = R;
+        ExpJob *jb = &job[njob];
+        memset(jb, 0, sizeof *jb);
+        jb->el = &pl->exp[(size_t)L * pl->n_experts + sel[j]];
+        jb->slot = es[j];
+        jb->latent = latent;
+        jb->out = (float *)malloc((size_t)Lat * sizeof(float));
+        jb->scratch = (float *)malloc((size_t)scratch_n * sizeof(float));
+        if (!jb->out || !jb->scratch) {
+            free(jb->out); free(jb->scratch);
+            free(latent); free(cur); free(out); free(acc);
+            return -1;
         }
-        for (int i = 0; i < Lat && i < clen; i++)
-            acc[i] += wsel[j] * cur[i];
+        jb->Lat = Lat;
+        jb->D = D;
+        jb->scratch_n = scratch_n;
+        if (pthread_create(&th[njob], NULL, exp_run, jb) != 0) {
+            free(jb->out); free(jb->scratch);
+            free(latent); free(cur); free(out); free(acc);
+            return -1;
+        }
+        njob++;
+    }
+    for (int j = 0; j < njob; j++)
+        pthread_join(th[j], NULL);
+    for (int j = 0; j < njob; j++) {
+        ExpJob *jb = &job[j];
+        if (jb->fail) {
+            for (int q = 0; q < njob; q++) {
+                free(job[q].out);
+                free(job[q].scratch);
+            }
+            free(latent); free(cur); free(out); free(acc);
+            return -1;
+        }
+        *n_matvec += jb->n_matvec;
+        *n_decode += jb->n_decode;
+    }
+    /* combine in selection order: acc[i] += wsel[sel order] * chain[i] */
+    {
+        int sj = 0;
+        for (int j = 0; j < cfg->topk; j++) {
+            if (!es[j]) continue;
+            ExpJob *jb = &job[sj++];
+            for (int i = 0; i < Lat; i++)
+                acc[i] += wsel[j] * jb->out[i];
+        }
+    }
+    for (int j = 0; j < njob; j++) {
+        free(job[j].out);
+        free(job[j].scratch);
     }
 
     /* state = state + W_up * acc */
