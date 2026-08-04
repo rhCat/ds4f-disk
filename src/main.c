@@ -222,7 +222,6 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "moe: token 0 layer %d\n", L);
             const uint8_t *tr = ds4f_trunk_bind(&trunk, L);
             if (!tr) { fprintf(stderr, "trunk bind failed at layer %d\n", L); return 2; }
-            hstate = ds4f_mix64(hstate ^ ds4f_checksum(tr, trunk.lay[L].nbytes));
 
             int use_real = moe_mode && tl.gate[L] >= 0;
             if (use_real) {
@@ -243,6 +242,12 @@ int main(int argc, char **argv) {
                         cfg.n_experts, cfg.hidden, state, scores);
                 ds4f_topk(scores, cfg.n_experts, cfg.topk, idx, w);
             } else {
+                /* hash-fallback layer: the trunk checksum feeds hstate,
+                 * which drives the hash router. Only pay for it here —
+                 * in moe mode with real gates it was 5.26 GB/token of
+                 * single-threaded hashing that fed nothing. */
+                hstate = ds4f_mix64(
+                    hstate ^ ds4f_checksum(tr, trunk.lay[L].nbytes));
                 ds4f_router(idx, w, &cfg, hstate, L, locality);
             }
 
