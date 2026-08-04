@@ -16,9 +16,12 @@
 static void usage(const char *argv0) {
     fprintf(stderr,
         "usage: %s MODEL_DIR --trunk TRUNK --offsets OFFSETS [opts]\n"
-        "  MODEL_DIR           dir containing config.json + model.safetensors\n"
+        "  MODEL_DIR           dir containing config.json (and model.safetensors\n"
+        "                      for the fixture path)\n"
         "  --trunk FILE        packed dense layers (tools/pack-trunk)\n"
         "  --offsets FILE      trunk offset table (trunk.offsets)\n"
+        "  --pool FILE         packed expert pool (tools/convert-ds4f.py);\n"
+        "                      when given, model.safetensors is not needed\n"
         "  --cache-gb X        expert cache budget in GB       (default 8)\n"
         "  --trunk-gb X        trunk pin budget in GB          (default 4)\n"
         "  --pin-layers N      explicit pinned trunk prefix    (default auto)\n"
@@ -41,7 +44,7 @@ static double now_s(void) {
 
 int main(int argc, char **argv) {
     const char *model_dir = NULL, *trunk_path = NULL, *off_path = NULL;
-    const char *trace_path = NULL, *prompt = "ds4f";
+    const char *trace_path = NULL, *prompt = "ds4f", *pool_path = NULL;
     double cache_gb = 8.0, trunk_gb = 4.0, locality = 0.0;
     int pin_layers = -1, nring = 2, gen = 4, threads = 4, refuse = 1;
     for (int i = 1; i < argc; i++) {
@@ -61,6 +64,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--threads") && i + 1 < argc) threads = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--trunk") && i + 1 < argc) trunk_path = argv[++i];
         else if (!strcmp(argv[i], "--offsets") && i + 1 < argc) off_path = argv[++i];
+        else if (!strcmp(argv[i], "--pool") && i + 1 < argc) pool_path = argv[++i];
         else if (!strcmp(argv[i], "--no-refuse")) refuse = 0;
         else if (!model_dir) model_dir = argv[i];
         else { usage(argv[0]); return 1; }
@@ -72,12 +76,21 @@ int main(int argc, char **argv) {
     Ds4fCfg cfg;
     if (ds4f_cfg_load(&cfg, model_dir) != 0) return 1;
 
-    char st_path[4096];
-    snprintf(st_path, sizeof st_path, "%s/model.safetensors", model_dir);
-    Ds4fSt st;
-    if (ds4f_st_open(&st, st_path) != 0) return 2;
     Ds4fExpertPool pool;
-    if (ds4f_pool_build(&pool, &st, &cfg) != 0) return 2;
+    const char *pool_src;
+    if (pool_path) {
+        /* packed pool from tools/convert-ds4f.py: no safetensors needed */
+        if (ds4f_pool_open_packed(&pool, pool_path, &cfg) != 0) return 2;
+        pool_src = "packed";
+    } else {
+        char st_path[4096];
+        snprintf(st_path, sizeof st_path, "%s/model.safetensors", model_dir);
+        Ds4fSt st;
+        if (ds4f_st_open(&st, st_path) != 0) return 2;
+        if (ds4f_pool_build(&pool, &st, &cfg) != 0) return 2;
+        ds4f_st_close(&st);
+        pool_src = "safetensors";
+    }
 
     Ds4fTrunk trunk;
     if (ds4f_trunk_open(&trunk, trunk_path, off_path) != 0) return 2;
@@ -196,7 +209,6 @@ int main(int argc, char **argv) {
 
     ds4f_cache_free(&cache);
     ds4f_trunk_close(&trunk);
-    ds4f_st_close(&st);
     free(pool.ref);
     return rc;
 }

@@ -114,6 +114,13 @@ typedef struct Ds4fExpertPool {
  * Names are expected as "e.{layer}.{expert}". */
 int ds4f_pool_build(Ds4fExpertPool *pool, const Ds4fSt *st, const Ds4fCfg *cfg);
 
+/* Open a packed expert pool written by tools/convert-ds4f.py:
+ *   [u64 expert_nbytes][u64 n_layers][u64 n_experts] then payload,
+ *   layer-major expert-minor, fixed-rate (expert N at base + N*nbytes).
+ * No index: the offsets are arithmetic. */
+int ds4f_pool_open_packed(Ds4fExpertPool *pool, const char *path,
+                          const Ds4fCfg *cfg);
+
 /* ------------------------------------------------------------------ */
 /* trunk: packed dense layers, pinned prefix + ring, prefetch         */
 /* ------------------------------------------------------------------ */

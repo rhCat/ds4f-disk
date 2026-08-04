@@ -37,6 +37,7 @@ src/mem.c               memory planner + peak-RSS measurement
 src/main.c              CLI: memory plan, decode loop, run report
 tools/make-fixture.c    tiny synthetic model (no real weights needed)
 tools/pack-trunk.c      layer files -> contiguous trunk.bin + offsets
+tools/convert-ds4f.py   HF checkpoint -> ds4f layout (inspect/convert)
 tools/trace_replay.py   LRU / Belady / PIN+LRU vs capacity
 tests/                  weightless gate suite + fixture e2e
 ```
@@ -64,6 +65,26 @@ python3 tools/trace_replay.py fixture/trace.csv --caps 1,2,4
 Presets: `--preset laptop` (8 GB cache / 4 GB trunk) or `--preset server`
 (64 / 48). Override with `--cache-gb`, `--trunk-gb`, `--pin-layers`,
 `--nring`, `--threads`.
+
+## Real checkpoint (DeepSeek-V4-Flash-class)
+
+Discovery first, conversion second -- the converter refuses rather than
+guesses at tensor naming:
+
+```sh
+python3 tools/convert-ds4f.py inspect /path/to/hf/repo   # paste back
+python3 tools/convert-ds4f.py convert /path/to/hf/repo --out ~/ds4f-model
+
+./ds4f ~/ds4f-model --trunk ~/ds4f-model/trunk.bin \
+    --offsets ~/ds4f-model/trunk.offsets --pool ~/ds4f-model/pool.bin \
+    --preset laptop
+```
+
+`convert` emits config.json (no-defaults keys), trunk.bin + offsets
+(dense per layer, packed), pool.bin (routed experts, fixed-rate,
+layer-major) and a manifest. Bytes are copied as-is: no quantization,
+no dtype conversion -- the engine currently validates the memory/I-O
+structure at real scale; kernels are roadmap.
 
 ## Exit codes
 

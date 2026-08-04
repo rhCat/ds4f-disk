@@ -117,3 +117,58 @@ int ds4f_pool_build(Ds4fExpertPool *pool, const Ds4fSt *st, const Ds4fCfg *cfg) 
     }
     return 0;
 }
+
+static int64_t rd_u64(const uint8_t *p) {
+    int64_t v = 0;
+    for (int i = 7; i >= 0; i--) v = (v << 8) | p[i];
+    return v;
+}
+
+int ds4f_pool_open_packed(Ds4fExpertPool *pool, const char *path,
+                          const Ds4fCfg *cfg) {
+    memset(pool, 0, sizeof *pool);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        fprintf(stderr, "pool: cannot open %s: %s\n", path, strerror(errno));
+        return -1;
+    }
+    uint8_t hdr[24];
+    if (pread(fd, hdr, 24, 0) != 24) {
+        fprintf(stderr, "pool: short header in %s\n", path);
+        close(fd);
+        return -1;
+    }
+    int64_t nbytes  = rd_u64(hdr);
+    int64_t n_layers = rd_u64(hdr + 8);
+    int64_t n_experts = rd_u64(hdr + 16);
+    if (nbytes <= 0 || n_layers != cfg->n_layers ||
+        n_experts != cfg->n_experts) {
+        fprintf(stderr,
+                "pool: header mismatch (nbytes %lld, %lld layers x %lld "
+                "experts; config %d x %d)\n",
+                (long long)nbytes, (long long)n_layers, (long long)n_experts,
+                cfg->n_layers, cfg->n_experts);
+        close(fd);
+        return -1;
+    }
+    int64_t total = nbytes * n_layers * n_experts;
+    off_t sz = lseek(fd, 0, SEEK_END);
+    if (sz != 24 + total) {
+        fprintf(stderr, "pool: size %lld, expected 24 + %lld\n",
+                (long long)sz, (long long)total);
+        close(fd);
+        return -1;
+    }
+    pool->fd = fd;
+    pool->n_layers = (int)n_layers;
+    pool->n_experts = (int)n_experts;
+    pool->nbytes = nbytes;
+    pool->ref = (Ds4fExpertRef *)calloc((size_t)(n_layers * n_experts),
+                                        sizeof(Ds4fExpertRef));
+    if (!pool->ref) return -1;
+    for (int64_t i = 0; i < n_layers * n_experts; i++) {
+        pool->ref[i].off = 24 + i * nbytes;
+        pool->ref[i].nbytes = nbytes;
+    }
+    return 0;
+}
