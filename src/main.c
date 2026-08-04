@@ -460,16 +460,21 @@ int main(int argc, char **argv) {
                 ds4f_topk(scores, cfg.n_experts, cfg.topk, idx, w);
                 if (getenv("DS4F_DEBUG4")) {
                     uint64_t ck = ds4f_mix64(0);
+                    double s2 = 0.0;
+                    long n = (long)cfg.hidden * mhc_streams;
                     for (int i = 0; i < cfg.hidden; i++) {
                         uint32_t bits;
                         memcpy(&bits, &state[i], 4);
                         ck = ds4f_mix64(ck ^ bits);
                     }
+                    for (long i = 0; i < n; i++)
+                        s2 += (double)state[i] * state[i];
                     fprintf(stderr, "[dbg4] t%d L%d scores %.6g %.6g %.6g %.6g"
-                            " idx %d%d%d stateck %016llx\n", t, L,
+                            " idx %d%d%d rms %.6g stateck %016llx\n", t, L,
                             (double)scores[0], (double)scores[1],
                             (double)scores[2], (double)scores[3],
                             idx[0], idx[1], idx[2],
+                            sqrt(s2 / (double)n),
                             (unsigned long long)ck);
                 }
             } else {
