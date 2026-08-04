@@ -551,9 +551,9 @@ def cmd_make_synthetic(dirpath):
     sizes = {}
     for i, name in enumerate(names):
         if "experts." in name and name.endswith(".scale"):
-            sizes[name] = 4            # one F32 scale
+            sizes[name] = 2            # F8_E8M0 block scales, 2 blocks
         elif "experts." in name:
-            sizes[name] = 32           # F8_E4M3, 32 elements
+            sizes[name] = 64           # I8, 64 elements
         elif "shared_experts" in name and name.endswith(".scale"):
             sizes[name] = 4
         elif "shared_experts" in name:
@@ -575,11 +575,13 @@ def cmd_make_synthetic(dirpath):
             a = len(payload)
             data = blob(name, sizes[name])
             payload += data
-            if name.endswith(".scale"):
+            if name.endswith(".scale") and "experts." in name:
+                dt, n = "F8_E8M0", 2    # real checkpoint: E8M0 block scales
+            elif name.endswith(".scale"):
                 dt, n = "F32", 1
             elif ".weight" in name and ("experts" in name
                                         or "shared_experts" in name):
-                dt, n = "I8", sizes[name]        # real checkpoint: I8 + scales
+                dt, n = "I8", sizes[name]   # real checkpoint: I8 + scales
             else:
                 dt, n = "F32", sizes[name] // 4
             entries[name] = {"dtype": dt, "shape": [n],
@@ -762,6 +764,46 @@ def cmd_self_test():
     print(f"self-test ok ({300} trials, worst abs err {worst:.6g})")
 
 
+def apply_scale(vals, sdata, sdt, scheme, shp, n):
+    """Multiply decoded values by their scale(s). vals is a numpy array
+    (numpy path) or a list (pure-python path)."""
+    if sdt == "F8_E8M0":
+        if scheme == "tensor":
+            s = e8m0_value(sdata[0])
+            return vals * s
+        if scheme == "row":
+            R, C = int(shp[0]), n // int(shp[0])
+            if _np is not None:
+                sca = _np.array([e8m0_value(b) for b in sdata], _np.float32)
+                return (vals.reshape(R, C) * sca[:, None]).reshape(-1)
+            sc = [e8m0_value(b) for b in sdata]
+            return [vals[r * C + c] * sc[r] for r in range(R)
+                    for c in range(C)]
+        sc = [e8m0_value(b) for b in sdata]
+        if _np is not None:
+            sca = _np.repeat(_np.array(sc, _np.float32), 32)[:n]
+            return vals * sca
+        return [vals[i] * sc[i // 32] for i in range(n)]
+    # F32 scales
+    if scheme == "tensor":
+        s = struct.unpack("<f", sdata[:4])[0]
+        return vals * s
+    if scheme == "row":
+        R, C = int(shp[0]), n // int(shp[0])
+        if _np is not None:
+            sca = _np.frombuffer(sdata, _np.float32)
+            return (vals.reshape(R, C) * sca[:, None]).reshape(-1)
+        sc = struct.unpack(f"<{R}f", sdata[:4 * R])
+        return [vals[r * C + c] * sc[r] for r in range(R) for c in range(C)]
+    # block32 with F32 scales (unusual but supported)
+    nblocks = (n + 31) // 32
+    if _np is not None:
+        sca = _np.repeat(_np.frombuffer(sdata, _np.float32), 32)[:n]
+        return vals * sca
+    sc = struct.unpack(f"<{nblocks}f", sdata[:4 * nblocks])
+    return [vals[i] * sc[i // 32] for i in range(n)]
+
+
 def cmd_quantize(dirpath, outdir, dry_run=False):
     root = find_repo_root(dirpath)
     if root is None:
@@ -816,30 +858,34 @@ def cmd_quantize(dirpath, outdir, dry_run=False):
                 continue
             wdata, _, _ = read(name)
             sdata, sdt, sshp = read(sc_name)
-            if sdt != "F32":
-                problems.append(f"{sc_name}: dtype {sdt}, expected F32")
+            if sdt not in ("F32", "F8_E8M0"):
+                problems.append(f"{sc_name}: dtype {sdt}, "
+                                f"expected F32 or F8_E8M0")
                 continue
             n = numel(shp)
-            s_elems = len(sdata) // 4
+            s_elems = len(sdata) // (4 if sdt == "F32" else 1)
             if s_elems == 1:
                 scheme = "tensor"
             elif len(shp) == 2 and s_elems == int(shp[0]):
                 scheme = "row"
+            elif s_elems == (n + 31) // 32:
+                scheme = "block32"
             else:
                 problems.append(f"{sc_name}: {s_elems} scales for shape {shp}")
                 continue
             schemes[name] = scheme
             layout.append((name, shp, (n + 1) // 2, (n + 31) // 32,
-                           (n + 31) // 32, scheme, dt))
+                           (n + 31) // 32, scheme, dt, sdt))
         layouts[(L, e)] = layout
 
     if dry_run:
         sample = next(iter(layouts.values()))
         print(f"expert weight tensors: {len(layouts)} experts, "
               f"{len(sample)} tensors each")
-        for (name, shp, vnb, snb, blk, scheme, dt) in sample:
-            print(f"  {name}: dtype {dt}, shape {shp}, scheme={scheme}, "
-                  f"values {vnb} B, block scales {snb} B ({blk} blocks)")
+        for (name, shp, vnb, snb, blk, scheme, dt, sdt) in sample:
+            print(f"  {name}: dtype {dt}, scale {sdt}, shape {shp}, "
+                  f"scheme={scheme}, values {vnb} B, "
+                  f"block scales {snb} B ({blk} blocks)")
         cnt = {}
         for s in schemes.values():
             cnt[s] = cnt.get(s, 0) + 1
@@ -848,7 +894,7 @@ def cmd_quantize(dirpath, outdir, dry_run=False):
             print(f"PROBLEMS ({len(problems)}):")
             for p in problems[:10]:
                 print(f"  {p}")
-        est = sum(vnb + snb for _, _, vnb, snb, _, _, _ in
+        est = sum(vnb + snb for _, _, vnb, snb, _, _, _, _ in
                   next(iter(layouts.values()))) * len(layouts)
         print(f"estimated mxfp4 pool: {hsize(est)} "
               f"(blocks of 32, E8M0 scales, values 2/byte)")
@@ -865,10 +911,10 @@ def cmd_quantize(dirpath, outdir, dry_run=False):
               "very slow on the real pool. Install numpy on the box.")
 
     # expert slot size is computable from shapes alone (fixed-rate)
-    slot = sum(vnb + snb for _, _, vnb, snb, _, _, _ in
+    slot = sum(vnb + snb for _, _, vnb, snb, _, _, _, _ in
                next(iter(layouts.values())))
     for (L, e), layout in layouts.items():
-        s = sum(vnb + snb for _, _, vnb, snb, _, _, _ in layout)
+        s = sum(vnb + snb for _, _, vnb, snb, _, _, _, _ in layout)
         if s != slot:
             print(f"REFUSE: expert ({L},{e}) slot {s} != {slot}")
             sys.exit(1)
@@ -886,7 +932,7 @@ def cmd_quantize(dirpath, outdir, dry_run=False):
     g_max, g_rms2, g_n = 0.0, 0.0, 0
     for (L, e) in sorted(experts):
         layout = layouts[(L, e)]
-        for (name, shp, vnb, snb, blk, scheme, dt) in layout:
+        for (name, shp, vnb, snb, blk, scheme, dt, sdt) in layout:
             wdata, _, _ = read(name)
             sdata, _, _ = read(name[:-len(".weight")] + ".scale")
             n = numel(shp)
@@ -896,12 +942,7 @@ def cmd_quantize(dirpath, outdir, dry_run=False):
                 else:
                     raw = _np.frombuffer(wdata, _np.uint8)
                     vals = FP8_LUT_NP[raw].astype(_np.float32)
-                if scheme == "tensor":
-                    vals = vals * struct.unpack("<f", sdata[:4])[0]
-                else:
-                    R, C = int(shp[0]), n // int(shp[0])
-                    sc = _np.frombuffer(sdata, _np.float32)
-                    vals = (vals.reshape(R, C) * sc[:, None]).reshape(-1)
+                vals = apply_scale(vals, sdata, sdt, scheme, shp, n)
                 vb, sbb, st = quantize_ndarray(vals)
             else:
                 if dt == "I8":
@@ -909,14 +950,7 @@ def cmd_quantize(dirpath, outdir, dry_run=False):
                                            signed=True) for i in range(n)]
                 else:
                     vals = [FP8_LUT[b] for b in wdata]
-                if scheme == "tensor":
-                    s = struct.unpack("<f", sdata[:4])[0]
-                    vals = [v * s for v in vals]
-                else:
-                    R, C = int(shp[0]), n // int(shp[0])
-                    sc = struct.unpack(f"<{R}f", sdata[:4 * R])
-                    vals = [vals[r * C + c] * sc[r]
-                            for r in range(R) for c in range(C)]
+                vals = apply_scale(vals, sdata, sdt, scheme, shp, n)
                 vb, sbb, st = quantize_py(vals)
             v_off = 24 + written
             pbin.write(vb)
