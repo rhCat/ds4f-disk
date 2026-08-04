@@ -171,6 +171,7 @@ int ds4f_trunk_layout_load(Ds4fTrunkLayout *tl, const char *path) {
         tl->hc_attn_fn[L] = tl->hc_attn_base[L] = tl->hc_attn_scale[L] = -1;
         tl->hc_ffn_fn[L] = tl->hc_ffn_base[L] = tl->hc_ffn_scale[L] = -1;
     }
+    tl->hc_head_fn = tl->hc_head_base = tl->hc_head_scale = -1;
     tl->kvlat = 0;
 
     int total = 0;
@@ -311,6 +312,12 @@ int ds4f_trunk_layout_load(Ds4fTrunkLayout *tl, const char *path) {
                 } else if (name_ends(tt->name, ".hc_ffn_scale")) {
                     if (tl->hc_ffn_scale[L] < 0)
                         tl->hc_ffn_scale[L] = k - 1;
+                } else if (name_ends(tt->name, ".hc_head_fn")) {
+                    if (tl->hc_head_fn < 0) tl->hc_head_fn = k - 1;
+                } else if (name_ends(tt->name, ".hc_head_base")) {
+                    if (tl->hc_head_base < 0) tl->hc_head_base = k - 1;
+                } else if (name_ends(tt->name, ".hc_head_scale")) {
+                    if (tl->hc_head_scale < 0) tl->hc_head_scale = k - 1;
                 }
             }
         }
@@ -430,28 +437,50 @@ static float hc_elem(const Ds4fTrunkTensor *t, const uint8_t *tr, long i) {
     return f[i];
 }
 
-/* mHC (n_hc = 1) input/output scalars (DeepSeek-V4 paper eq. 1/3/5/7):
- *   xhat = RMSNorm(state)
- *   A = sigmoid( alpha_pre * dot(xhat, W_pre) + S_pre )
- *   C = 2 * sigmoid( alpha_post * dot(xhat, W_post) + S_post )
- * The residual transform B is doubly stochastic at n_hc = 1, i.e. 1,
- * so the update is x_out = x + C * F(A * x). fn is [H x 3] (cols pre,
- * post, res), base [3], scale [3] (alpha_pre, alpha_post, alpha_res).
- * F32/BF16 weights. Returns 1 when present, 0 when absent (A = C = 1),
- * -1 on shape mismatch (the caller decides: refuse or fall back). */
-int ds4f_hc_ac(const Ds4fTrunkLayout *tl, int fn_i, int base_i, int sc_i,
-               const uint8_t *tr, int H, const float *state,
-               float *A, float *C) {
-    *A = 1.0f;
-    *C = 1.0f;
+/* Sinkhorn-Knopp: B = doubly stochastic projection of exp(Btilde)
+ * (paper eq. 8), 20 row/col normalizations. */
+static void sinkhorn(const float *btilde, int n, float *B) {
+    double M[64];
+    for (int i = 0; i < n * n; i++) M[i] = exp((double)btilde[i]);
+    for (int it = 0; it < 20; it++) {
+        for (int r = 0; r < n; r++) {
+            double s = 0.0;
+            for (int c = 0; c < n; c++) s += M[r * n + c];
+            if (s > 0.0)
+                for (int c = 0; c < n; c++) M[r * n + c] /= s;
+        }
+        for (int c = 0; c < n; c++) {
+            double s = 0.0;
+            for (int r = 0; r < n; r++) s += M[r * n + c];
+            if (s > 0.0)
+                for (int r = 0; r < n; r++) M[r * n + c] /= s;
+        }
+    }
+    for (int i = 0; i < n * n; i++) B[i] = (float)M[i];
+}
+
+/* mHC params (DeepSeek-V4 paper eq. 1/3-8). fn = [(n_hc*(2+n_hc)) x
+ * (n_hc*H)]: rows [0,n_hc) W_pre, [n_hc,2n_hc) W_post, then W_res.
+ * base = [n_hc*(2+n_hc)] (S in the same row order), scale = [3]
+ * (alpha_pre, alpha_post, alpha_res). F32/BF16. */
+int ds4f_hc_params(const Ds4fTrunkLayout *tl, int fn_i, int base_i,
+                   int sc_i, const uint8_t *tr, int H,
+                   const float *state, int *n_hc_out,
+                   float *A, float *C, float *B) {
     if (fn_i < 0 || base_i < 0 || sc_i < 0) return 0;
     const Ds4fTrunkTensor *fn = &tl->t[fn_i];
     const Ds4fTrunkTensor *bs = &tl->t[base_i];
     const Ds4fTrunkTensor *al = &tl->t[sc_i];
-    if (fn->rank != 2 || fn->dims[0] != H || fn->dims[1] != 3) {
-        fprintf(stderr,
-                "hc: fn shape [%ld x %ld] unsupported (want [%d x 3])\n",
-                (long)fn->dims[0], (long)fn->dims[1], H);
+    long rows = fn->dims[0], cols = fn->dims[1];
+    if (fn->rank != 2 || cols % H != 0) {
+        fprintf(stderr, "hc: fn shape [%ld x %ld] unsupported "
+                        "(want [n*(2+n) x n*%d])\n", rows, cols, H);
+        return -1;
+    }
+    int nhc = (int)(cols / H);
+    if (rows != (long)nhc * (2 + nhc)) {
+        fprintf(stderr, "hc: fn rows %ld unsupported (n_hc=%d wants %d)\n",
+                rows, nhc, nhc * (2 + nhc));
         return -1;
     }
     if ((fn->dtype != 0 && fn->dtype != 4) ||
@@ -460,21 +489,49 @@ int ds4f_hc_ac(const Ds4fTrunkLayout *tl, int fn_i, int base_i, int sc_i,
         fprintf(stderr, "hc: dtype unsupported (F32/BF16 only)\n");
         return -1;
     }
-    /* xhat = RMSNorm(state) */
+    /* xhat = RMSNorm(vec(state)) over the whole n_hc*H stream */
+    long total = (long)nhc * H;
     double ss = 0.0;
-    for (int i = 0; i < H; i++) ss += (double)state[i] * state[i];
-    float r = sqrtf((float)(ss / (double)H) + 1e-6f);
-    float dot_pre = 0.0f, dot_post = 0.0f;
-    for (int i = 0; i < H; i++) {
-        float xh = state[i] / r;
-        dot_pre += xh * hc_elem(fn, tr, (long)i * 3 + 0);
-        dot_post += xh * hc_elem(fn, tr, (long)i * 3 + 1);
+    for (long i = 0; i < total; i++) ss += (double)state[i] * state[i];
+    float r = sqrtf((float)(ss / (double)total) + 1e-6f);
+
+    for (int j = 0; j < nhc; j++) {
+        double dp = 0.0, dq = 0.0;
+        for (long i = 0; i < total; i++) {
+            float xh = state[i] / r;
+            dp += (double)xh * hc_elem(fn, tr, (long)j * cols + i);
+            dq += (double)xh * hc_elem(fn, tr, (long)(nhc + j) * cols + i);
+        }
+        float a_pre = hc_elem(al, tr, 0) * (float)dp + hc_elem(bs, tr, j);
+        float a_post = hc_elem(al, tr, 1) * (float)dq +
+                       hc_elem(bs, tr, nhc + j);
+        A[j] = 1.0f / (1.0f + expf(-a_pre));
+        C[j] = 2.0f / (1.0f + expf(-a_post));
     }
-    float a_pre = hc_elem(al, tr, 0) * dot_pre + hc_elem(bs, tr, 0);
-    float a_post = hc_elem(al, tr, 1) * dot_post + hc_elem(bs, tr, 1);
-    *A = 1.0f / (1.0f + expf(-a_pre));
-    *C = 2.0f / (1.0f + expf(-a_post));
-    return 1;
+    float btilde[64];
+    for (int r2 = 0; r2 < nhc; r2++) {
+        for (int c2 = 0; c2 < nhc; c2++) {
+            double d = 0.0;
+            for (long i = 0; i < total; i++)
+                d += (double)(state[i] / r) * hc_elem(
+                    fn, tr, (long)(2 * nhc + r2 * nhc + c2) * cols + i);
+            btilde[r2 * nhc + c2] =
+                hc_elem(al, tr, 2) * (float)d +
+                hc_elem(bs, tr, 2 * nhc + r2 * nhc + c2);
+        }
+    }
+    sinkhorn(btilde, nhc, B);
+    *n_hc_out = nhc;
+    return nhc;
+}
+
+void ds4f_hc_combine(int n_hc, int H, const float *A, const float *state,
+                     float *x_in) {
+    for (int i = 0; i < H; i++) {
+        float s = 0.0f;
+        for (int j = 0; j < n_hc; j++) s += A[j] * state[j * H + i];
+        x_in[i] = s;
+    }
 }
 
 int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
@@ -488,19 +545,23 @@ int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
     if (M > D) D = M;
     if (D < 1) return -1;
 
-    /* mHC (issue #6 step 6): F_ffn sees A*state; the output replaces
-     * the residual: state_out = state + C * F(A*state). orig holds the
-     * pre-ffn state; the RMS-rescale below is the no-hc fallback. */
-    float hcA = 1.0f, hcC = 1.0f;
-    int hc_ok = tl ? ds4f_hc_ac(tl, tl->hc_ffn_fn[L], tl->hc_ffn_base[L],
-                                tl->hc_ffn_scale[L], tr, H, state,
-                                &hcA, &hcC) : 0;
+    /* mHC (issue #6 step 6): F_ffn sees x_in = A·vec(X); the update is
+     * new[j*H+i] = sum_k B[j][k]*orig[k*H+i] + C[j]*F[i]. orig holds
+     * the pre-ffn streams; the RMS-rescale below is the no-hc
+     * fallback. */
+    float A[8], C[8], B[64];
+    int nhc = 1;
+    int hc_ok = tl ? ds4f_hc_params(tl, tl->hc_ffn_fn[L], tl->hc_ffn_base[L],
+                                    tl->hc_ffn_scale[L], tr, H, state,
+                                    &nhc, A, C, B) : 0;
     if (hc_ok < 0) return -1;
-    float *orig = hc_ok ? (float *)malloc((size_t)H * sizeof(float)) : NULL;
-    if (hc_ok && !orig) return -1;
+    float *orig = NULL, *xin = NULL;
     if (hc_ok) {
-        memcpy(orig, state, (size_t)H * sizeof(float));
-        for (int i = 0; i < H; i++) state[i] *= hcA;
+        orig = (float *)malloc((size_t)nhc * H * sizeof(float));
+        xin = (float *)malloc((size_t)H * sizeof(float));
+        if (!orig || !xin) { free(orig); free(xin); return -1; }
+        memcpy(orig, state, (size_t)nhc * H * sizeof(float));
+        ds4f_hc_combine(nhc, H, A, state, xin);
     }
 
     /* Entry RMS: the reference rescales the residual to this at the end
@@ -521,20 +582,22 @@ int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
     (void)cur;              /* expert chains now run in worker threads */
     (void)scratch;          /* job 0 uses the caller's warm buffer */
 
-    /* latent = W_down * state (identity when absent / mismatched) */
+    /* latent = W_down * x_in (identity when absent / mismatched) */
     int di = tl ? tl->down[L] : -1, ui = tl ? tl->up[L] : -1;
     int did_ok = 0;
     if (di >= 0 && tl->t[di].dtype == 0 && tl->t[di].rank == 2) {
         long R = tl->t[di].dims[0], C = tl->t[di].dims[1];
         if (C == H && R <= D) {
             ds4f_f32_matvec((const float *)(const void *)(tr + tl->t[di].off),
-                            (int)R, (int)C, state, latent);
+                            (int)R, (int)C,
+                            hc_ok ? xin : state, latent);
             (*n_matvec)++;
             did_ok = 1;
         }
     }
     if (!did_ok) {
-        for (int i = 0; i < Lat && i < H; i++) latent[i] = state[i];
+        const float *xinp = hc_ok ? xin : state;
+        for (int i = 0; i < Lat && i < H; i++) latent[i] = xinp[i];
         for (int i = H; i < Lat; i++) latent[i] = 0.0f;
     }
 
@@ -598,34 +661,59 @@ int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
     for (int j = 0; j < njob; j++)
         free(job[j].out);            /* scratch is borrowed */
 
-    /* state = state + W_up * acc */
+    /* state = state + W_up * acc (mHC: streams = B*orig + C*F) */
     int up_ok = 0;
     if (ui >= 0 && tl->t[ui].dtype == 0 && tl->t[ui].rank == 2) {
-        long R = tl->t[ui].dims[0], C = tl->t[ui].dims[1];
-        if (C == Lat && R <= D) {
+        long R = tl->t[ui].dims[0], Uc = tl->t[ui].dims[1];
+        if (Uc == Lat && R <= D) {
             ds4f_f32_matvec((const float *)(const void *)(tr + tl->t[ui].off),
-                            (int)R, (int)C, acc, out);
+                            (int)R, (int)Uc, acc, out);
             (*n_matvec)++;
             /* a short up matvec (R < H) leaves out[R..H) untouched:
-             * zero it so state += out is deterministic (the tail must
+             * zero it so the update is deterministic (the tail must
              * not be malloc garbage) */
             if (R < H) memset(out + R, 0, (size_t)(H - R) * sizeof(float));
-            for (int i = 0; i < H; i++) state[i] += out[i];
+            if (hc_ok) {
+                /* new[j*H+i] = sum_k B[j][k]*orig[k*H+i] + C[j]*out[i] */
+                for (int i = 0; i < H; i++) {
+                    float mix[8];
+                    for (int j = 0; j < nhc; j++) {
+                        float s = 0.0f;
+                        for (int k = 0; k < nhc; k++)
+                            s += B[j * nhc + k] * orig[k * H + i];
+                        mix[j] = s + C[j] * out[i];
+                    }
+                    for (int j = 0; j < nhc; j++) state[j * H + i] = mix[j];
+                }
+            } else {
+                for (int i = 0; i < H; i++) state[i] += out[i];
+            }
             up_ok = 1;
         }
     }
-    if (!up_ok)
-        for (int i = 0; i < H && i < Lat; i++) state[i] += acc[i];
+    if (!up_ok) {
+        if (hc_ok) {
+            /* F identity: out = x_in; streams = B*orig + C*x_in */
+            for (int i = 0; i < H; i++) {
+                float mix[8];
+                for (int j = 0; j < nhc; j++) {
+                    float s = 0.0f;
+                    for (int k = 0; k < nhc; k++)
+                        s += B[j * nhc + k] * orig[k * H + i];
+                    mix[j] = s + C[j] * xin[i];
+                }
+                for (int j = 0; j < nhc; j++) state[j * H + i] = mix[j];
+            }
+        } else {
+            for (int i = 0; i < H && i < Lat; i++) state[i] += acc[i];
+        }
+    }
 
-    /* Activation bounding. With mHC tensors: state_out = orig + C*F,
-     * where F = A*orig + up_out - A*orig (state currently holds
-     * A*orig + up_out). Without them, fall back to the RMS-rescale
-     * (deterministic IEEE sqrtf/div, both backends must match it). */
-    if (hc_ok) {
-        for (int i = 0; i < H; i++)
-            state[i] = orig[i] + hcC * (state[i] - hcA * orig[i]);
-        free(orig);
-    } else {
+    /* Activation bounding. With mHC tensors the stream update above
+     * already is the bounded residual (B doubly stochastic, C <= 2).
+     * Without them, fall back to the RMS-rescale (deterministic IEEE
+     * sqrtf/div, both backends must match it exactly). */
+    if (!hc_ok) {
         double ss = 0.0;
         for (int i = 0; i < H; i++) {
             float v = state[i];
@@ -637,6 +725,8 @@ int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
             for (int i = 0; i < H; i++) state[i] *= gain;
     }
 
+    free(orig);
+    free(xin);
     free(latent); free(cur); free(out); free(acc);
     return 0;
 }

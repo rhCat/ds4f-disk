@@ -313,6 +313,11 @@ def classify(shards):
             dense.setdefault(int(m.group(1)),
                              []).append((name, fn, off, nb, dt, shp))
             continue
+        # global tensors carried in the trunk (the engine indexes them
+        # by role): hc_head_* (mHC output contraction) go in layer 0
+        if name in ("hc_head_fn", "hc_head_base", "hc_head_scale"):
+            dense.setdefault(0, []).append((name, fn, off, nb, dt, shp))
+            continue
         other.append((name, fn, off, nb, dt, shp))
     return experts, dense, shared, other
 
@@ -651,6 +656,7 @@ def cmd_make_synthetic(dirpath):
                 ]
     names += ["norm.weight"]
     names += [f"mtp.{m}.hc_attn_base" for m in range(1)]
+    names += ["hc_head_fn", "hc_head_base", "hc_head_scale"]
     names += [f"mtp.0.ffn.experts.0.w1.weight", f"mtp.0.ffn.experts.0.w1.scale"]
 
     def blob(name, n, dtype):
@@ -733,6 +739,10 @@ def cmd_make_synthetic(dirpath):
 
     # 2-D shapes so the engine's matvec chain has real dims
     shape_of = {}
+    # global HC head (mHC output contraction; carried in layer 0)
+    shape_of["hc_head_fn"] = [24, 32]
+    shape_of["hc_head_base"] = [24]
+    shape_of["hc_head_scale"] = [3]
     for L in range(2):
         shape_of[f"layers.{L}.attn.wq_a.weight"] = [4, 8]
         shape_of[f"layers.{L}.attn.wq_a.scale"] = [1, 1]
@@ -749,11 +759,11 @@ def cmd_make_synthetic(dirpath):
         shape_of[f"layers.{L}.attn.q_norm.weight"] = [4]
         shape_of[f"layers.{L}.attn.kv_norm.weight"] = [4]
         shape_of[f"layers.{L}.attn.attn_sink"] = [64]
-        shape_of[f"layers.{L}.hc_attn_fn"] = [8, 3]
-        shape_of[f"layers.{L}.hc_attn_base"] = [3]
+        shape_of[f"layers.{L}.hc_attn_fn"] = [24, 32]
+        shape_of[f"layers.{L}.hc_attn_base"] = [24]
         shape_of[f"layers.{L}.hc_attn_scale"] = [3]
-        shape_of[f"layers.{L}.hc_ffn_fn"] = [8, 3]
-        shape_of[f"layers.{L}.hc_ffn_base"] = [3]
+        shape_of[f"layers.{L}.hc_ffn_fn"] = [24, 32]
+        shape_of[f"layers.{L}.hc_ffn_base"] = [24]
         shape_of[f"layers.{L}.hc_ffn_scale"] = [3]
         shape_of[f"layers.{L}.ffn.gate.weight"] = [4, 8]
         shape_of[f"layers.{L}.ffn.gate.bias"] = [4]

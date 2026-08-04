@@ -107,15 +107,19 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
     float *chb = cha + H;
     float *chc = chb + H;
 
-    /* mHC (issue #6 step 6): F_attn sees A*state; the residual keeps
-     * the ORIGINAL state + C*F. xin is H floats beyond the chain. */
-    float hcA = 1.0f, hcC = 1.0f;
-    int hc_ok = ds4f_hc_ac(tl, tl->hc_attn_fn[L], tl->hc_attn_base[L],
-                           tl->hc_attn_scale[L], tr, H, state, &hcA, &hcC);
+    /* mHC (issue #6 step 6): F_attn sees x_in = A·vec(X) (the n_hc
+     * residual streams combined); the update is
+     * new[j*H+i] = sum_k B[j][k]*state[k*H+i] + C[j]*F[i]. xin is H
+     * floats beyond the chain (alloc has 4*H + 1). */
+    float A[8], C[8], B[64];
+    int nhc = 1;
+    int hc_ok = ds4f_hc_params(tl, tl->hc_attn_fn[L], tl->hc_attn_base[L],
+                               tl->hc_attn_scale[L], tr, H, state,
+                               &nhc, A, C, B);
     if (hc_ok < 0) { free(buf); return -1; }
     float *xin = chc + H;
     if (hc_ok)
-        for (int i = 0; i < H; i++) xin[i] = state[i] * hcA;
+        ds4f_hc_combine(nhc, H, A, state, xin);
     else
         xin = state;
 
@@ -169,11 +173,25 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
         for (int i = 0; i < kvhalf; i++) outv[i] += w * v2[i];
     }
 
-    /* output chain at H width: wo_a -> wo_b -> wo_c, residual */
+    /* output chain at H width: wo_a -> wo_b -> wo_c */
     f8_matvec_t(tl, woa, woa_s, tr, H, kvhalf, outv, cha);
     f8_matvec_t(tl, wob, wob_s, tr, H, H, cha, chb);
     f8_matvec_t(tl, woc, woc_s, tr, H, H, chb, chc);
-    for (int i = 0; i < H; i++) state[i] += hcC * chc[i];
+    if (hc_ok) {
+        /* new[j*H+i] = sum_k B[j][k]*state[k*H+i] + C[j]*chc[i] */
+        float mix[8];
+        for (int i = 0; i < H; i++) {
+            for (int j = 0; j < nhc; j++) {
+                float s = 0.0f;
+                for (int k = 0; k < nhc; k++)
+                    s += B[j * nhc + k] * state[k * H + i];
+                mix[j] = s + C[j] * chc[i];
+            }
+            for (int j = 0; j < nhc; j++) state[j * H + i] = mix[j];
+        }
+    } else {
+        for (int i = 0; i < H; i++) state[i] += chc[i];
+    }
 
     free(buf);
     return 0;

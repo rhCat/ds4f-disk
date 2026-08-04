@@ -78,29 +78,35 @@ typedef struct Ds4fTrunkLayout {
           hc_attn_scale[DS4F_MAX_LAYERS];
     int   hc_ffn_fn[DS4F_MAX_LAYERS],  hc_ffn_base[DS4F_MAX_LAYERS],
           hc_ffn_scale[DS4F_MAX_LAYERS];
+    /* global HC head (learned output contraction over the streams) */
+    int   hc_head_fn, hc_head_base, hc_head_scale;
     int   kvlat;                /* wkv output dim (0 = no attention) */
 } Ds4fTrunkLayout;
 
 /* Load trunk.json (as written by tools/convert-ds4f.py convert). */
 int ds4f_trunk_layout_load(Ds4fTrunkLayout *tl, const char *path);
 
-/* Apply a hyper-connection scale tensor (hc_attn_base / hc_ffn_base,
- * issue #6): elementwise [H] or scalar, F32/BF16/I8/F8. No-op when
- * idx < 0. Replaces the RMS-rescale stand-in when present. */
-void ds4f_apply_hc(const Ds4fTrunkLayout *tl, int idx, const uint8_t *tr,
-                   int H, float *state);
+/* mHC (DeepSeek-V4 paper eq. 1-8, n_hc general):
+ *   X_{l+1} = B·X + C·F(A·X)     X in R^{n_hc x H}, vec(X) = state
+ *   xhat = RMSNorm(vec(X))
+ *   A = sigmoid(alpha_pre * (xhat . W_pre) + S_pre)          [n_hc]
+ *   C = 2*sigmoid(alpha_post * (xhat . W_post) + S_post)     [n_hc]
+ *   B = Sinkhorn(exp(alpha_res * Mat(xhat . W_res) + S_res)) [n_hc x n_hc]
+ * fn = [(n_hc*(2+n_hc)) x (n_hc*H)]: rows [0,n_hc) W_pre,
+ * [n_hc,2n_hc) W_post, [2n_hc,..) W_res (the checkpoint stores the
+ * projections transposed). base = [n_hc*(2+n_hc)] (S in the same row
+ * order), scale = [3] (alpha_pre, alpha_post, alpha_res).
+ * Returns n_hc (>0) with A/C/B set; 0 when absent; -1 on mismatch. */
+int ds4f_hc_params(const Ds4fTrunkLayout *tl, int fn_i, int base_i,
+                   int sc_i, const uint8_t *tr, int H,
+                   const float *state, int *n_hc_out,
+                   float *A, float *C, float *B);
 
-/* mHC (n_hc = 1) input/output scalars for one connection (issue #6):
- *   xhat = RMSNorm(state)
- *   A = sigmoid( alpha_pre * dot(xhat, W_pre) + S_pre )
- *   C = 2 * sigmoid( alpha_post * dot(xhat, W_post) + S_post )
- * fn = [H x 3] F32/BF16 (cols pre, post, res; res unused at n_hc=1),
- * base = [3] (S_pre, S_post, S_res), scale = [3] (alpha_pre,
- * alpha_post, alpha_res). Returns 1 when present (A/C set), else 0
- * with A = C = 1. Refuses (returns -1) on unexpected shapes. */
-int ds4f_hc_ac(const Ds4fTrunkLayout *tl, int fn_i, int base_i, int sc_i,
-               const uint8_t *tr, int H, const float *state,
-               float *A, float *C);
+/* Combine the n_hc residual streams with A into the layer input
+ * x_in[i] = sum_j A[j] * state[j*H + i]. Needs A from hc_params;
+ * x_in must hold H floats. */
+void ds4f_hc_combine(int n_hc, int H, const float *A, const float *state,
+                     float *x_in);
 
 /* Top-k over scores: descending, tie-break by expert index (earlier
  * expert wins ties -- deterministic). */

@@ -191,6 +191,7 @@ int main(int argc, char **argv) {
     int kv_ok = 0;
     int moe_mode = 0;
     float *state = NULL, *scratch = NULL;
+    int mhc_streams = 1;      /* residual streams (n_hc), 1 without mHC */
     float **jscratch = NULL;
     long scratch_n = 0;
     int64_t n_matvec = 0, n_decode = 0;
@@ -314,20 +315,38 @@ int main(int argc, char **argv) {
     }
 
     if (moe_mode) {
-        state = (float *)malloc((size_t)cfg.hidden * sizeof(float));
+        /* mHC: the residual stream is n_hc x H (n_hc from the first
+         * hc fn tensor's column count / hidden); 1 without hc. */
+        int nstreams = 1;
+        if (tl.hc_attn_fn[0] >= 0 &&
+            tl.t[tl.hc_attn_fn[0]].rank == 2 &&
+            tl.t[tl.hc_attn_fn[0]].dims[1] % cfg.hidden == 0)
+            nstreams = (int)(tl.t[tl.hc_attn_fn[0]].dims[1] /
+                             cfg.hidden);
+        state = (float *)malloc((size_t)cfg.hidden * nstreams *
+                                sizeof(float));
         if (!state) return 2;
         if (text_mode) {
-            if (npids > 0)
+            if (npids > 0) {
                 ds4f_embed_gather(&embed, pids[0], state);
-            else
-                for (int i = 0; i < cfg.hidden; i++) state[i] = 0.0f;
+                for (int j = 1; j < nstreams; j++)
+                    memcpy(state + (size_t)j * cfg.hidden, state,
+                           (size_t)cfg.hidden * sizeof(float));
+            } else {
+                for (int i = 0; i < cfg.hidden * nstreams; i++)
+                    state[i] = 0.0f;
+            }
         } else {
             for (int i = 0; i < cfg.hidden; i++) {
                 uint64_t h = ds4f_mix64(hstate ^ ds4f_mix64((uint64_t)i));
                 state[i] = (float)((double)((int64_t)(h % 1000)) / 100.0 -
                                    5.0);
             }
+            for (int j = 1; j < nstreams; j++)
+                memcpy(state + (size_t)j * cfg.hidden, state,
+                       (size_t)cfg.hidden * sizeof(float));
         }
+        mhc_streams = nstreams;
     }
 
     int idx[64];
@@ -343,12 +362,19 @@ int main(int argc, char **argv) {
     memset(slots, 0, sizeof slots);
     memset(scores, 0, sizeof scores);
     memset(es, 0, sizeof es);
+    /* mHC layer-input buffer for the ffn router (H floats) */
+    float *xin_buf = (float *)malloc((size_t)cfg.hidden * sizeof(float));
+    if (!xin_buf) return 2;
     int last_tok = npids > 0 ? pids[0] : -1;
 
     double t0 = now_s();
     for (int t = 0; t < gen; t++) {
-        if (text_mode && t > 0)
+        if (text_mode && t > 0) {
             ds4f_embed_gather(&embed, last_tok, state);
+            for (int j = 1; j < mhc_streams; j++)
+                memcpy(state + (size_t)j * cfg.hidden, state,
+                       (size_t)cfg.hidden * sizeof(float));
+        }
         for (int L = 0; L < cfg.n_layers; L++) {
             if (moe_mode && t == 0 && L < 3)
                 fprintf(stderr, "moe: token 0 layer %d\n", L);
@@ -384,14 +410,30 @@ int main(int argc, char **argv) {
                     const Ds4fTrunkTensor *bt = &tl.t[tl.gate_bias[L]];
                     gbias = (const float *)(const void *)(tr + bt->off);
                 }
+                /* the ffn router sees the mHC layer input (A-combined
+                 * streams) when the checkpoint has hc_ffn tensors */
+                const float *rstate = state;
+                if (tl.hc_ffn_fn[L] >= 0) {
+                    float A[8], C[8], B[64];
+                    int nhc = 1;
+                    int hok = ds4f_hc_params(
+                        &tl, tl.hc_ffn_fn[L], tl.hc_ffn_base[L],
+                        tl.hc_ffn_scale[L], tr, cfg.hidden, state,
+                        &nhc, A, C, B);
+                    if (hok < 0) return 2;
+                    if (hok > 0) {
+                        ds4f_hc_combine(nhc, cfg.hidden, A, state, xin_buf);
+                        rstate = xin_buf;
+                    }
+                }
                 if (gt->dtype == 4)      /* BF16 */
                     ds4f_bf16_matvec(
                         (const uint16_t *)(const void *)(tr + gt->off),
-                        cfg.n_experts, cfg.hidden, state, gbias, scores);
+                        cfg.n_experts, cfg.hidden, rstate, gbias, scores);
                 else                     /* F32 */
                     ds4f_router_scores(
                         (const float *)(const void *)(tr + gt->off), gbias,
-                        cfg.n_experts, cfg.hidden, state, scores);
+                        cfg.n_experts, cfg.hidden, rstate, scores);
                 ds4f_topk(scores, cfg.n_experts, cfg.topk, idx, w);
                 if (getenv("DS4F_DEBUG4")) {
                     uint64_t ck = ds4f_mix64(0);
@@ -448,7 +490,25 @@ int main(int argc, char **argv) {
                     fprintf(trf, "%d,%d\n", L, idx[j]);
         }
         if (text_mode) {
-            if (ds4f_head_logits(&head, state, logits) != 0) {
+            /* the head reads the mHC-contracted stream when the
+             * checkpoint has the global hc_head (learned output
+             * contraction); otherwise stream 0 (single-stream state) */
+            const float *hstate_in = state;
+            if (tl.hc_head_fn >= 0) {
+                const uint8_t *trh = ds4f_trunk_bind(&trunk,
+                                                     cfg.n_layers - 1);
+                float A[8], C[8], B[64];
+                int nhc = 1;
+                int hok = ds4f_hc_params(
+                    &tl, tl.hc_head_fn, tl.hc_head_base, tl.hc_head_scale,
+                    trh, cfg.hidden, state, &nhc, A, C, B);
+                if (hok < 0) return 2;
+                if (hok > 0) {
+                    ds4f_hc_combine(nhc, cfg.hidden, A, state, xin_buf);
+                    hstate_in = xin_buf;
+                }
+            }
+            if (ds4f_head_logits(&head, hstate_in, logits) != 0) {
                 fprintf(stderr, "head logits failed\n");
                 return 2;
             }
@@ -488,7 +548,8 @@ int main(int argc, char **argv) {
         }
         FILE *df = fopen(dump_path, "wb");
         if (!df) { fprintf(stderr, "cannot open %s\n", dump_path); return 2; }
-        fwrite(state, sizeof(float), (size_t)cfg.hidden, df);
+        fwrite(state, sizeof(float),
+               (size_t)cfg.hidden * (size_t)mhc_streams, df);
         fclose(df);
     }
 
@@ -535,6 +596,7 @@ int main(int argc, char **argv) {
 
     free(state);
     free(scratch);
+    free(xin_buf);
     free(logits);
     free(pids);
     ds4f_head_free(&head);
