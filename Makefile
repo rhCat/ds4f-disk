@@ -3,15 +3,17 @@ CFLAGS  ?= -std=c99 -O2 -Wall -Wextra -pthread
 INC      = -Iinclude -Isrc
 SRC      = src/cfg.c src/st.c src/trunk.c src/cache.c src/router.c src/mem.c src/kernels.c src/moe.c
 
+HDR = include/ds4f/ds4f.h include/ds4f/kernels.h include/ds4f/moe.h src/json.h
+
 all: ds4f pack-trunk make-fixture
 
-ds4f: src/main.c $(SRC) include/ds4f/ds4f.h
+ds4f: src/main.c $(SRC) $(HDR)
 	$(CC) $(CFLAGS) $(INC) -o $@ src/main.c $(SRC)
 
-pack-trunk: tools/pack-trunk.c
+pack-trunk: tools/pack-trunk.c $(HDR)
 	$(CC) $(CFLAGS) $(INC) -o $@ tools/pack-trunk.c
 
-make-fixture: tools/make-fixture.c
+make-fixture: tools/make-fixture.c $(HDR)
 	$(CC) $(CFLAGS) $(INC) -o $@ tools/make-fixture.c
 
 test: all

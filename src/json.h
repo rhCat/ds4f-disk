@@ -190,11 +190,10 @@ static JEntry *j_value(JDoc *d, const char **pp, const char *end) {
         }
         JEntry *e = j_new(d);
         if (!e) return NULL;
+        int e_i = d->npool - 1;             /* index, not pointer: pool may realloc */
         e->type = 3;
         int base = j_reserve(d, n);
         if (base < 0) return NULL;
-        e->child = &d->pool[base];
-        e->nchild = n;
         for (int i = 0; i < n; i++) {
             p = j_ws(p, end);
             JEntry *v = j_value(d, &p, end);
@@ -205,6 +204,12 @@ static JEntry *j_value(JDoc *d, const char **pp, const char *end) {
             if (p < end && *p == ',') p++;
         }
         if (p < end && *p == ']') p++;
+        /* set child AFTER the fill loop: recursive j_value calls above may
+         * realloc the pool, so &d->pool[base] taken before the loop would
+         * dangle (ASan-confirmed heap-use-after-free on the real trunk.json) */
+        e = &d->pool[e_i];
+        e->child = &d->pool[base];
+        e->nchild = n;
         *pp = p;
         return e;
     }
