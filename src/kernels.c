@@ -144,3 +144,56 @@ void ds4f_f8_decode_row(const uint8_t *W, const uint8_t *scales,
         out[c] = fp8_lut[wr[c]] * s;
     }
 }
+
+void ds4f_i8_matvec(const uint8_t *W, const uint8_t *scales,
+                    int R, int C, int SR, int SC, const float *x,
+                    float *y) {
+    if (SR < 1) SR = 1;
+    if (SC < 1) SC = 1;
+    for (int r = 0; r < R; r++) {
+        float acc = 0.0f;
+        int sr = (int)(((int64_t)r * SR) / R);
+        const uint8_t *wr = W + (size_t)r * C;
+        for (int c = 0; c < C; c++) {
+            int sc = (int)(((int64_t)c * SC) / C);
+            float s = scales ? ds4f_e8m0_value(scales[sr * SC + sc])
+                             : 1.0f;
+            acc += (float)(int8_t)wr[c] * s * x[c];
+        }
+        y[r] = acc;
+    }
+}
+
+float ds4f_f16_to_f32(uint16_t h) {
+    uint32_t sign = (uint32_t)(h & 0x8000u) << 16;
+    uint32_t exp = (h >> 10) & 0x1Fu;
+    uint32_t man = h & 0x3FFu;
+    uint32_t bits;
+    if (exp == 0) {
+        if (man == 0) {
+            bits = sign;
+        } else {
+            exp = 127 - 15 + 1;
+            while (!(man & 0x400u)) { man <<= 1; exp--; }
+            man &= 0x3FFu;
+            bits = sign | (exp << 23) | (man << 13);
+        }
+    } else if (exp == 31) {
+        bits = sign | 0x7F800000u | (man << 13);
+    } else {
+        bits = sign | ((exp + 127 - 15) << 23) | (man << 13);
+    }
+    float f;
+    memcpy(&f, &bits, 4);
+    return f;
+}
+
+void ds4f_f16_matvec(const uint16_t *W, int R, int C, const float *x,
+                     float *y) {
+    for (int r = 0; r < R; r++) {
+        float acc = 0.0f;
+        const uint16_t *wr = W + (size_t)r * C;
+        for (int c = 0; c < C; c++) acc += ds4f_f16_to_f32(wr[c]) * x[c];
+        y[r] = acc;
+    }
+}
