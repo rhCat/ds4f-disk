@@ -122,6 +122,10 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
         ds4f_hc_combine(nhc, H, A, state, xin);
     else
         xin = state;
+    /* layer-input RMS: the F-rescale target (see the update below) */
+    double x2 = 0.0;
+    for (int i = 0; i < H; i++) x2 += (double)xin[i] * xin[i];
+    float rms_in = sqrtf((float)(x2 / (double)H));
 
     /* kv latent, normed, cached */
     f8_matvec_t(tl, wkv, wkv_s, tr, kvlat, H, xin, kvlat_buf);
@@ -178,6 +182,17 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
     f8_matvec_t(tl, wob, wob_s, tr, H, H, cha, chb);
     f8_matvec_t(tl, woc, woc_s, tr, H, H, chb, chc);
     if (hc_ok) {
+        /* F-rescale: the approximate attention reads amplify (the real
+         * model bounds F by training against the manifold-constrained
+         * residual). Rescale F to the layer-input RMS so the mHC
+         * update is finite; the real fix is the exact MLA column
+         * reads. */
+        double s2 = 0.0;
+        for (int i = 0; i < H; i++) s2 += (double)chc[i] * chc[i];
+        float rms_f = sqrtf((float)(s2 / (double)H)) + 1e-30f;
+        float gain = rms_in / rms_f;
+        if (gain > 0.0f && gain < 1e30f)
+            for (int i = 0; i < H; i++) chc[i] *= gain;
         /* new[j*H+i] = sum_k B[j][k]*state[k*H+i] + C[j]*chc[i] */
         float mix[8];
         for (int i = 0; i < H; i++) {

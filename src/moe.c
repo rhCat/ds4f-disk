@@ -564,12 +564,17 @@ int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
         ds4f_hc_combine(nhc, H, A, state, xin);
     }
 
-    /* Entry RMS: the reference rescales the residual to this at the end
-     * of the layer (see below). Only needed for the no-hc fallback. */
+    /* Entry RMS: the F-rescale target (hc) or the RMS-rescale fallback
+     * target (no hc). */
     double ss_in = 0.0;
-    if (!hc_ok)
-        for (int i = 0; i < H; i++) ss_in += (double)state[i] * state[i];
-    float rms_in = hc_ok ? 0.0f : sqrtf((float)(ss_in / (double)H));
+    if (hc_ok) {
+        for (int i = 0; i < H; i++)
+            ss_in += (double)xin[i] * xin[i];
+    } else {
+        for (int i = 0; i < H; i++)
+            ss_in += (double)state[i] * state[i];
+    }
+    float rms_in = sqrtf((float)(ss_in / (double)H));
 
     float *latent = (float *)calloc((size_t)D, sizeof(float));
     float *cur    = (float *)calloc((size_t)D, sizeof(float));
@@ -674,6 +679,16 @@ int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
              * not be malloc garbage) */
             if (R < H) memset(out + R, 0, (size_t)(H - R) * sizeof(float));
             if (hc_ok) {
+                /* F-rescale: the approximate expert reads amplify (the
+                 * real model bounds F by training). Rescale the up
+                 * output to the layer-input RMS so the mHC update is
+                 * finite; the real fix is the exact MLA/MoE reads. */
+                double s2 = 0.0;
+                for (int i = 0; i < H; i++) s2 += (double)out[i] * out[i];
+                float rms_f = sqrtf((float)(s2 / (double)H)) + 1e-30f;
+                float gain = rms_in / rms_f;
+                if (gain > 0.0f && gain < 1e30f)
+                    for (int i = 0; i < H; i++) out[i] *= gain;
                 /* new[j*H+i] = sum_k B[j][k]*orig[k*H+i] + C[j]*out[i] */
                 for (int i = 0; i < H; i++) {
                     float mix[8];
