@@ -63,17 +63,18 @@ int ds4f_head_load(Ds4fHead *h, const char *json_path) {
     if (bl >= sizeof bin_path) { json_free(doc); free(js); return -1; }
     memcpy(bin_path, bin->str, bl);
     bin_path[bl] = 0;
-    /* resolve relative to the json's directory */
+    /* resolve relative to the json's directory (in place, back-to-front
+     * so no overlap: shift the name right, then copy the dir prefix) */
     {
         char *slash = strrchr(json_path, '/');
         if (slash) {
-            char dir[4096], full[8192];
             size_t dl = (size_t)(slash - json_path);
-            if (dl >= sizeof dir) { json_free(doc); free(js); return -1; }
-            memcpy(dir, json_path, dl);
-            dir[dl] = 0;
-            snprintf(full, sizeof full, "%s/%s", dir, bin_path);
-            snprintf(bin_path, sizeof bin_path, "%s", full);
+            if (dl + bl + 1 > sizeof bin_path) {
+                json_free(doc); free(js); return -1;
+            }
+            memmove(bin_path + dl + 1, bin_path, bl + 1);
+            memcpy(bin_path, json_path, dl);
+            bin_path[dl] = '/';
         }
     }
     h->w_off = jnum(json_get(w->child, w->nchild, "off"), 0);
@@ -153,13 +154,11 @@ int ds4f_embed_load(Ds4fEmbed *e, const char *json_path) {
         }
         char *slash = strrchr(json_path, '/');
         if (slash) {
-            char dir[4096], full[8192];
             size_t dl = (size_t)(slash - json_path);
-            if (dl >= sizeof dir) return -1;
-            memcpy(dir, json_path, dl);
-            dir[dl] = 0;
-            snprintf(full, sizeof full, "%s/%s", dir, bin_path);
-            snprintf(bin_path, sizeof bin_path, "%s", full);
+            if (dl + bl + 1 > sizeof bin_path) return -1;
+            memmove(bin_path + dl + 1, bin_path, bl + 1);
+            memcpy(bin_path, json_path, dl);
+            bin_path[dl] = '/';
         }
         e->buf_n = read_file_buf(bin_path, &e->buf);
     }
