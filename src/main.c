@@ -59,6 +59,13 @@ static double now_s(void) {
 }
 
 int main(int argc, char **argv) {
+    fprintf(stderr, "ds4f build %s\n",
+#ifdef DS4F_GIT
+            DS4F_GIT
+#else
+            "dev"
+#endif
+            );
     const char *model_dir = NULL, *trunk_path = NULL, *off_path = NULL;
     const char *trace_path = NULL, *prompt = "ds4f", *pool_path = NULL;
     const char *tl_path = NULL, *pl_path = NULL, *dump_path = NULL;
