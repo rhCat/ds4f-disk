@@ -551,7 +551,7 @@ def cmd_make_synthetic(dirpath):
     sizes = {}
     for i, name in enumerate(names):
         if "experts." in name and name.endswith(".scale"):
-            sizes[name] = 2            # F8_E8M0 block scales, 2 blocks
+            sizes[name] = 4            # F8_E8M0, one per 16 elems (block16)
         elif "experts." in name:
             sizes[name] = 64           # I8, 64 elements
         elif "shared_experts" in name and name.endswith(".scale"):
@@ -576,7 +576,7 @@ def cmd_make_synthetic(dirpath):
             data = blob(name, sizes[name])
             payload += data
             if name.endswith(".scale") and "experts." in name:
-                dt, n = "F8_E8M0", 2    # real checkpoint: E8M0 block scales
+                dt, n = "F8_E8M0", 4    # real checkpoint: E8M0 per-16 block scales
             elif name.endswith(".scale"):
                 dt, n = "F32", 1
             elif ".weight" in name and ("experts" in name
@@ -780,10 +780,16 @@ def apply_scale(vals, sdata, sdt, scheme, shp, n):
             return [vals[r * C + c] * sc[r] for r in range(R)
                     for c in range(C)]
         sc = [e8m0_value(b) for b in sdata]
+        if scheme == "block32":
+            if _np is not None:
+                sca = _np.repeat(_np.array(sc, _np.float32), 32)[:n]
+                return vals * sca
+            return [vals[i] * sc[i // 32] for i in range(n)]
+        # block16
         if _np is not None:
-            sca = _np.repeat(_np.array(sc, _np.float32), 32)[:n]
+            sca = _np.repeat(_np.array(sc, _np.float32), 16)[:n]
             return vals * sca
-        return [vals[i] * sc[i // 32] for i in range(n)]
+        return [vals[i] * sc[i // 16] for i in range(n)]
     # F32 scales
     if scheme == "tensor":
         s = struct.unpack("<f", sdata[:4])[0]
@@ -795,13 +801,14 @@ def apply_scale(vals, sdata, sdt, scheme, shp, n):
             return (vals.reshape(R, C) * sca[:, None]).reshape(-1)
         sc = struct.unpack(f"<{R}f", sdata[:4 * R])
         return [vals[r * C + c] * sc[r] for r in range(R) for c in range(C)]
-    # block32 with F32 scales (unusual but supported)
-    nblocks = (n + 31) // 32
+    # block32/block16 with F32 scales (unusual but supported)
+    step = 32 if scheme == "block32" else 16
+    nblocks = (n + step - 1) // step
     if _np is not None:
-        sca = _np.repeat(_np.frombuffer(sdata, _np.float32), 32)[:n]
+        sca = _np.repeat(_np.frombuffer(sdata, _np.float32), step)[:n]
         return vals * sca
     sc = struct.unpack(f"<{nblocks}f", sdata[:4 * nblocks])
-    return [vals[i] * sc[i // 32] for i in range(n)]
+    return [vals[i] * sc[i // step] for i in range(n)]
 
 
 def cmd_quantize(dirpath, outdir, dry_run=False):
@@ -870,6 +877,8 @@ def cmd_quantize(dirpath, outdir, dry_run=False):
                 scheme = "row"
             elif s_elems == (n + 31) // 32:
                 scheme = "block32"
+            elif s_elems == (n + 15) // 16:
+                scheme = "block16"     # real checkpoint: one E8M0 per 16 elems
             else:
                 problems.append(f"{sc_name}: {s_elems} scales for shape {shp}")
                 continue
