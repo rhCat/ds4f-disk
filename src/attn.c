@@ -204,6 +204,18 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
             }
             for (int j = 0; j < nhc; j++) state[j * H + i] = mix[j];
         }
+        /* state-rescale: the mHC update carries the input forward
+         * (B ~ identity) plus up to C*F, so the state lands at
+         * ~(1+C)*rms_in and compounds. Bound the whole state to the
+         * layer-input RMS -- the real model's trained F achieves this
+         * internally; the interim preserves the mHC shape (B-mixing,
+         * C distribution) with a bounded magnitude. */
+        double t2 = 0.0;
+        for (int i = 0; i < nhc * H; i++) t2 += (double)state[i] * state[i];
+        float rms_s = sqrtf((float)(t2 / (double)(nhc * H))) + 1e-30f;
+        float sgain = rms_in / rms_s;
+        if (sgain > 0.0f && sgain < 1e30f)
+            for (int i = 0; i < nhc * H; i++) state[i] *= sgain;
     } else {
         for (int i = 0; i < H; i++) state[i] += chc[i];
     }
