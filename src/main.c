@@ -235,6 +235,13 @@ int main(int argc, char **argv) {
             if (tl.gate[L] >= 0) nreal++;
         fprintf(stderr, "router: real matvec on %d/%d layers, "
                         "others hash fallback\n", nreal, cfg.n_layers);
+        int nha = 0, nhf = 0;
+        for (int L = 0; L < cfg.n_layers; L++) {
+            if (tl.hc_attn[L] >= 0) nha++;
+            if (tl.hc_ffn[L] >= 0) nhf++;
+        }
+        fprintf(stderr, "hc: hyper-connections on %d/%d attn, %d/%d ffn\n",
+                nha, cfg.n_layers, nhf, cfg.n_layers);
     }
 
     uint64_t hstate = ds4f_mix64(0);
