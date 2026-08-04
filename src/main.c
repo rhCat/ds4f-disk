@@ -150,9 +150,14 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    fprintf(stderr, "moe: starting trunk (npin=%d slot=%lld ring=%d)\n",
+            npin, (long long)slot, nring);
     if (ds4f_trunk_start(&trunk, npin, slot, nring) != 0) return 2;
+    fprintf(stderr, "moe: trunk started; cache init (%d slots, %d threads)\n",
+            nslot, threads);
     Ds4fCache cache;
     if (ds4f_cache_init(&cache, &pool, nslot, threads) != 0) return 2;
+    fprintf(stderr, "moe: cache ready\n");
 
     FILE *trf = NULL;
     if (trace_path) {
@@ -169,12 +174,17 @@ int main(int argc, char **argv) {
     long scratch_n = 0;
     int64_t n_matvec = 0, n_decode = 0;
     if (tl_path && pl_path) {
+        fprintf(stderr, "moe: loading trunk layout %s\n", tl_path);
         if (ds4f_trunk_layout_load(&tl, tl_path) != 0) return 1;
+        fprintf(stderr, "moe: trunk layout ok (%d layers)\n", tl.n_layers);
+        fprintf(stderr, "moe: loading pool layout %s\n", pl_path);
         if (ds4f_pool_layout_load(&pl, pl_path, &cfg) != 0) return 1;
+        fprintf(stderr, "moe: pool layout ok (%d x %d, max_rc=%lld)\n",
+                pl.n_layers, pl.n_experts, (long long)pl.max_rc);
         moe_mode = 1;
         scratch_n = pl.max_rc;
         scratch = (float *)malloc((size_t)scratch_n * sizeof(float));
-        if (!scratch) return 2;
+        if (!scratch) { fprintf(stderr, "moe: scratch alloc failed\n"); return 2; }
         plan.state_b += (double)scratch_n * 4.0;
         plan.need_b = plan.trunk_pin_b + plan.trunk_ring_b + plan.cache_b +
                       plan.shared_b + plan.state_b + plan.index_b;
@@ -205,6 +215,8 @@ int main(int argc, char **argv) {
     double t0 = now_s();
     for (int t = 0; t < gen; t++) {
         for (int L = 0; L < cfg.n_layers; L++) {
+            if (moe_mode && t == 0 && L < 3)
+                fprintf(stderr, "moe: token 0 layer %d\n", L);
             const uint8_t *tr = ds4f_trunk_bind(&trunk, L);
             if (!tr) { fprintf(stderr, "trunk bind failed at layer %d\n", L); return 2; }
             hstate = ds4f_mix64(hstate ^ ds4f_checksum(tr, trunk.lay[L].nbytes));
