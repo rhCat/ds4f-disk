@@ -41,8 +41,9 @@ ALIASES = {
 REQUIRED = ["n_layers", "n_experts", "topk", "n_shared", "hidden"]
 
 EXPERT_RE = re.compile(r"(?:^|\.)layers\.(\d+)\.(?:mlp|ffn)\.experts\.(\d+)\.(.+)$")
-SHARED_RE = re.compile(r"(?:^|\.)layers\.(\d+)\.(?:mlp|ffn)\.shared_expert\.(.+)$")
+SHARED_RE = re.compile(r"(?:^|\.)layers\.(\d+)\.(?:mlp|ffn)\.shared_experts?\.(.+)$")
 LAYER_RE = re.compile(r"^(?:model\.)?layers\.(\d+)\.")
+MTP_RE = re.compile(r"^mtp\.(\d+)\.")
 
 
 def skeleton(name):
@@ -247,7 +248,7 @@ def cmd_inspect(dirpath):
                   f"build a fixed-rate pool; refuse")
         for (L, e) in sorted(experts)[:3]:
             print(f"  e({L},{e}): " +
-                  ", ".join(f"{t[0].split('.')[-1]}={hsize(t[3])}"
+                  ", ".join(f"{'.'.join(t[0].split('.')[-2:])}={hsize(t[3])}"
                             for t in experts[(L, e)]))
     else:
         print("\nrouted experts: NONE matched the .experts.{e}. pattern")
@@ -258,11 +259,16 @@ def cmd_inspect(dirpath):
     if dense:
         L0 = min(dense)
         print(f"  sample layer {L0}: " +
-              ", ".join(f"{t[0].split('.')[-1]}={hsize(t[3])}"
+              ", ".join(f"{'.'.join(t[0].split('.')[-2:])}={hsize(t[3])}"
                         for t in sorted(dense[L0])[:8]))
     if shared:
         print(f"shared experts: {hsize(sum(t[3] for ts in shared.values() for t in ts))}"
               f" (resident)")
+    mtp = [n for n in shards if MTP_RE.match(n)]
+    if mtp:
+        print(f"MTP block (multi-token prediction): {len(mtp)} tensors, "
+              f"{hsize(sum(shards[n][2] for n in mtp))} -- excluded from "
+              f"pool/trunk (main layers only)")
     if other:
         ob = sum(t[3] for t in other)
         print(f"unclassified (embed/norm/lm_head/...): {hsize(ob)}")
@@ -507,16 +513,20 @@ def cmd_make_synthetic(dirpath):
             f"layers.{L}.attn.wq_a.weight",
             f"layers.{L}.attn.wq_a.scale",
             f"layers.{L}.ffn.gate",
-            f"layers.{L}.ffn.shared_expert.up_proj",
-            f"layers.{L}.ffn.shared_expert.down_proj",
+            f"layers.{L}.ffn.shared_experts.w1.weight",
+            f"layers.{L}.ffn.shared_experts.w1.scale",
+            f"layers.{L}.ffn.shared_experts.w2.weight",
+            f"layers.{L}.ffn.shared_experts.w2.scale",
         ]
         for e in range(4):
-            names += [
-                f"layers.{L}.ffn.experts.{e}.up_proj",
-                f"layers.{L}.ffn.experts.{e}.down_proj",
-                f"layers.{L}.ffn.experts.{e}.gate_proj",
-            ]
+            for w in (1, 2, 3):
+                names += [
+                    f"layers.{L}.ffn.experts.{e}.w{w}.weight",
+                    f"layers.{L}.ffn.experts.{e}.w{w}.scale",
+                ]
     names += ["norm.weight"]
+    names += [f"mtp.{m}.hc_attn_base" for m in range(1)]
+    names += [f"mtp.0.ffn.experts.0.w1.weight", f"mtp.0.ffn.experts.0.w1.scale"]
 
     def blob(name, n):
         x = 0x1234
@@ -529,9 +539,9 @@ def cmd_make_synthetic(dirpath):
     sizes = {}
     for i, name in enumerate(names):
         if "experts." in name:
-            sizes[name] = 64          # 3 tensors x 64 B -> expert 192 B
-        elif "shared_expert" in name:
-            sizes[name] = 32
+            sizes[name] = 32 if name.endswith(".weight") else 16
+        elif "shared_experts" in name:
+            sizes[name] = 24 if name.endswith(".weight") else 12
         elif "embed" in name:
             sizes[name] = 96
         elif name.endswith("gate"):
