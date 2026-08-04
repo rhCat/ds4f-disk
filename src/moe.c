@@ -93,14 +93,27 @@ int ds4f_pool_layout_load(Ds4fPoolLayout *pl, const char *path,
             rc *= t->dims[d];
         }
         if (rc > pl->max_rc) pl->max_rc = rc;
-        /* v_off is absolute in the pool file; slot base is arithmetic */
-        long slot_off = 24 +
-            (long)((size_t)L * pl->n_experts + X) * pl->expert_nbytes;
-        t->rel_v = vo->inum - slot_off;
-        t->rel_s = so->inum - slot_off;
+        /* v_off is absolute in the pool file; slot base is arithmetic.
+         * Compute in int64 throughout: pool offsets reach ~68 GB and any
+         * 32-bit step wraps rel_v negative -> out-of-bounds reads. */
+        int64_t slot_off = 24 +
+            (int64_t)L * pl->n_experts * pl->expert_nbytes +
+            (int64_t)X * pl->expert_nbytes;
+        t->rel_v = (long)(vo->inum - slot_off);
+        t->rel_s = (long)(so->inum - slot_off);
         t->v_nbytes = vn->inum;
         t->s_nbytes = sn->inum;
         t->bsize = 32;             /* mxfp4-pool-v1 output format */
+        if (t->rel_v < 0 || t->rel_s < 0 ||
+            t->rel_v + t->v_nbytes > pl->expert_nbytes ||
+            t->rel_s + t->s_nbytes > pl->expert_nbytes) {
+            fprintf(stderr,
+                "pool layout: tensor L%d E%d out of slot bounds "
+                "(rel_v=%ld rel_s=%ld, slot=%lld)\n",
+                L, X, t->rel_v, t->rel_s, (long long)pl->expert_nbytes);
+            json_free(doc); free(buf);
+            return -1;
+        }
     }
     json_free(doc);
     free(buf);
@@ -269,7 +282,13 @@ int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
             const Ds4fMoETensor *t = &el->t[ti];
             if (t->rank != 2) continue;
             long R = t->dims[0], C = t->dims[1];
-            if (C != clen || R > D || R * C > scratch_n) continue;
+            if (C != clen || R > D) continue;
+            if (R * C > scratch_n) {
+                fprintf(stderr, "moe: scratch too small (need %ld, have %ld)\n",
+                        R * C, scratch_n);
+                free(latent); free(cur); free(out); free(acc);
+                return -1;
+            }
             ds4f_mxfp4_matvec(slot + t->rel_v, slot + t->rel_s,
                               (int)R, (int)C, t->bsize, cur, out, scratch);
             (*n_matvec)++;
