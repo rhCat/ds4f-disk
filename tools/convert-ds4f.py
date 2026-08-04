@@ -434,21 +434,33 @@ def cmd_convert(dirpath, outdir):
     buf = bytearray(1 << 20)
     at = 0
     trunk_layout = {"n_layers": len(layers), "layers": []}
+    align = 8
     for L in layers:
         tens = sorted(dense[L])
-        lay_bytes = sum(t[3] for t in tens)
         put_u64(toff, at)
-        put_u64(toff, lay_bytes)
-        rel = 0
+        lay_bytes = 0
         ltens = []
+        # 8-byte alignment per tensor: the engine reads F32/BF16 tensors
+        # through typed pointers, and misaligned offsets are UB that
+        # clang -O2 exploits (widened loads past the buffer -> garbage).
         for t in tens:
             f, off, nb = src(t[0])
+            pad = (-lay_bytes) % align
+            if pad:
+                tbin.write(b"\0" * pad)
+                lay_bytes += pad
             copy_range(f, off, nb, tbin, buf)
             ltens.append({"n": t[0], "dtype": t[4], "shape": list(t[5]),
-                          "off": rel, "nbytes": nb})
-            rel += nb
+                          "off": lay_bytes, "nbytes": nb})
+            lay_bytes += nb
+        put_u64(toff, lay_bytes)
         trunk_layout["layers"].append({"layer": L, "tensors": ltens})
         at += lay_bytes
+        if L + 1 < len(layers):
+            pad = (-at) % align
+            if pad:
+                tbin.write(b"\0" * pad)
+                at += pad
         print(f"  trunk layer {L}: {hsize(lay_bytes)}")
     tbin.close()
     toff.close()
@@ -476,6 +488,45 @@ def cmd_convert(dirpath, outdir):
                 print(f"  pool: {done}/{total} experts, {hsize(written)}")
     pbin.close()
     print(f"pool.bin {hsize(written)} ({done} experts x {hsize(expert_bytes)})")
+
+    # ---------------- embed.bin + head.bin (issue #6 step 3) ----------
+    # The autoregressive loop needs the embedding table (gather) and the
+    # output head (logits). Both live in the unclassified set; bytes are
+    # copied as-is with a tiny layout json per file.
+    def find_other(name):
+        for t in other:
+            if t[0] == name:
+                return t
+        return None
+
+    emb = find_other("embed.weight")
+    if emb:
+        f, off, nb = src(emb[0])
+        with open(os.path.join(outdir, "embed.bin"), "wb") as eb:
+            copy_range(f, off, nb, eb, buf)
+        with open(os.path.join(outdir, "embed.json"), "w") as ej:
+            json.dump({"bin": "embed.bin", "dtype": emb[4],
+                       "shape": list(emb[5]), "nbytes": nb}, ej, indent=1)
+        print(f"embed.bin {hsize(nb)} {emb[4]} {list(emb[5])}")
+
+    hw = find_other("head.weight")
+    hs = find_other("head.scale")
+    if hw and hs:
+        f_w, off_w, nb_w = src(hw[0])
+        f_s, off_s, nb_s = src(hs[0])
+        with open(os.path.join(outdir, "head.bin"), "wb") as hb:
+            copy_range(f_w, off_w, nb_w, hb, buf)
+            copy_range(f_s, off_s, nb_s, hb, buf)
+        with open(os.path.join(outdir, "head.json"), "w") as hj:
+            json.dump({
+                "bin": "head.bin",
+                "weight": {"off": 0, "nbytes": nb_w, "dtype": hw[4],
+                           "shape": list(hw[5])},
+                "scale": {"off": nb_w, "nbytes": nb_s, "dtype": hs[4],
+                          "shape": list(hs[5])},
+            }, hj, indent=1)
+        print(f"head.bin {hsize(nb_w + nb_s)} "
+              f"{hw[4]} {list(hw[5])} + {hs[4]} {list(hs[5])}")
 
     for f in srcs.values():
         f.close()

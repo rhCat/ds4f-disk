@@ -8,6 +8,7 @@
 #include "ds4f/kernels.h"
 #include "ds4f/moe.h"
 #include "ds4f/attn.h"
+#include "ds4f/head.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -28,6 +29,9 @@ static void usage(const char *argv0) {
         "  --layout-trunk FILE trunk.json tensor layout (enables real MoE)\n"
         "  --layout-pool FILE  pool-mxfp4.json tensor layout (real MoE)\n"
         "  --dump-state FILE   write final hidden state (fp32) after run\n"
+        "  --head FILE         head.json (logits; enables text mode)\n"
+        "  --embed FILE        embed.json (embedding table; text mode)\n"
+        "  --prompt-ids S      comma-separated token ids (first = seed)\n"
         "  --cache-gb X        expert cache budget in GB       (default 8)\n"
         "  --trunk-gb X        trunk pin budget in GB          (default 4)\n"
         "  --pin-layers N      explicit pinned trunk prefix    (default auto)\n"
@@ -54,6 +58,7 @@ int main(int argc, char **argv) {
     const char *model_dir = NULL, *trunk_path = NULL, *off_path = NULL;
     const char *trace_path = NULL, *prompt = "ds4f", *pool_path = NULL;
     const char *tl_path = NULL, *pl_path = NULL, *dump_path = NULL;
+    const char *head_path = NULL, *embed_path = NULL, *prompt_ids = NULL;
     double cache_gb = 8.0, trunk_gb = 4.0, locality = 0.0;
     int pin_layers = -1, nring = 2, gen = 4, threads = 4, refuse = 1;
     for (int i = 1; i < argc; i++) {
@@ -77,6 +82,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--layout-trunk") && i + 1 < argc) tl_path = argv[++i];
         else if (!strcmp(argv[i], "--layout-pool") && i + 1 < argc) pl_path = argv[++i];
         else if (!strcmp(argv[i], "--dump-state") && i + 1 < argc) dump_path = argv[++i];
+        else if (!strcmp(argv[i], "--head") && i + 1 < argc) head_path = argv[++i];
+        else if (!strcmp(argv[i], "--embed") && i + 1 < argc) embed_path = argv[++i];
+        else if (!strcmp(argv[i], "--prompt-ids") && i + 1 < argc) prompt_ids = argv[++i];
         else if (!strcmp(argv[i], "--no-refuse")) refuse = 0;
         else if (!strcmp(argv[i], "--no-simd")) ds4f_kernels_set_simd(0);
         else if (!model_dir) model_dir = argv[i];
@@ -227,21 +235,80 @@ int main(int argc, char **argv) {
     for (const char *p = prompt; *p; p++)
         hstate = ds4f_mix64(hstate ^ (uint8_t)*p);
 
+    /* text mode (issue #6 step 3): embed -> layers -> head -> sample */
+    Ds4fHead head;
+    Ds4fEmbed embed;
+    float *logits = NULL;
+    int *pids = NULL;
+    int npids = 0, text_mode = 0;
+    uint64_t rng = hstate;
+    memset(&head, 0, sizeof head);
+    memset(&embed, 0, sizeof embed);
+    if (head_path && embed_path) {
+        if (ds4f_head_load(&head, head_path) != 0 ||
+            ds4f_embed_load(&embed, embed_path) != 0) {
+            fprintf(stderr, "text mode init failed\n");
+            return 1;
+        }
+        long V = head.dims[0];
+        logits = (float *)malloc((size_t)V * sizeof(float));
+        if (!logits) return 2;
+        if (prompt_ids) {
+            char *dup = strdup(prompt_ids);
+            char *save = NULL;
+            for (char *tok = strtok_r(dup, ",", &save); tok;
+                 tok = strtok_r(NULL, ",", &save)) {
+                int *np = (int *)realloc(pids,
+                    (size_t)(npids + 1) * sizeof(int));
+                if (!np) return 2;
+                pids = np;
+                pids[npids++] = atoi(tok);
+            }
+            free(dup);
+        }
+        text_mode = 1;
+        plan.state_b += (double)head.buf_n + (double)embed.buf_n +
+                        (double)V * 4.0;
+        plan.need_b = plan.trunk_pin_b + plan.trunk_ring_b + plan.cache_b +
+                      plan.shared_b + plan.state_b + plan.index_b;
+    }
+
     if (moe_mode) {
         state = (float *)malloc((size_t)cfg.hidden * sizeof(float));
         if (!state) return 2;
-        for (int i = 0; i < cfg.hidden; i++) {
-            uint64_t h = ds4f_mix64(hstate ^ ds4f_mix64((uint64_t)i));
-            state[i] = (float)((double)((int64_t)(h % 1000)) / 100.0 - 5.0);
+        if (text_mode) {
+            if (npids > 0)
+                ds4f_embed_gather(&embed, pids[0], state);
+            else
+                for (int i = 0; i < cfg.hidden; i++) state[i] = 0.0f;
+        } else {
+            for (int i = 0; i < cfg.hidden; i++) {
+                uint64_t h = ds4f_mix64(hstate ^ ds4f_mix64((uint64_t)i));
+                state[i] = (float)((double)((int64_t)(h % 1000)) / 100.0 -
+                                   5.0);
+            }
         }
     }
 
     int idx[64];
     float w[64];
     int slots[64];
+    float scores[256];
+    const uint8_t *es[64];
+    /* zero the whole stack arrays: topk fills only [0..topk), and an
+     * uninitialized read past it is the flaky nondeterminism (values
+     * vary with ASLR; -O2 reads them at ~3-25% of runs). */
+    memset(idx, 0, sizeof idx);
+    memset(w, 0, sizeof w);
+    memset(slots, 0, sizeof slots);
+    memset(scores, 0, sizeof scores);
+    memset(es, 0, sizeof es);
+    int last_tok = npids > 0 ? pids[0] : -1;
 
     double t0 = now_s();
     for (int t = 0; t < gen; t++) {
+        if (text_mode && t > 0)
+            ds4f_embed_gather(&embed, last_tok, state);
         for (int L = 0; L < cfg.n_layers; L++) {
             if (moe_mode && t == 0 && L < 3)
                 fprintf(stderr, "moe: token 0 layer %d\n", L);
@@ -251,11 +318,27 @@ int main(int argc, char **argv) {
             int use_real = moe_mode && tl.gate[L] >= 0;
             /* MLA attention first: it reads/writes state, and the
              * router below sees the post-attention state (real order) */
-            if (use_real && kv_ok)
+            if (use_real && kv_ok && !getenv("DS4F_SKIP_ATTN"))
                 ds4f_attn_step(&cfg, &tl, L, tr, state, &kvc, t);
+            if (getenv("DS4F_DEBUG2")) {
+                uint64_t ck = ds4f_mix64(0);
+                for (int i = 0; i < cfg.hidden; i++) {
+                    uint32_t bits;
+                    memcpy(&bits, &state[i], 4);
+                    ck = ds4f_mix64(ck ^ bits);
+                }
+                fprintf(stderr, "[dbg2] t%d L%d after attn %016llx\n", t, L,
+                        (unsigned long long)ck);
+            }
+            if (getenv("DS4F_DEBUG3")) {
+                uint32_t u0, u1;
+                memcpy(&u0, &state[0], 4);
+                memcpy(&u1, &state[1], 4);
+                fprintf(stderr, "[dbg3] t%d L%d attn state[0..1] %08x %08x\n",
+                        t, L, u0, u1);
+            }
             if (use_real) {
                 const Ds4fTrunkTensor *gt = &tl.t[tl.gate[L]];
-                float scores[256];
                 const float *gbias = NULL;
                 if (tl.gate_bias[L] >= 0) {
                     const Ds4fTrunkTensor *bt = &tl.t[tl.gate_bias[L]];
@@ -270,6 +353,20 @@ int main(int argc, char **argv) {
                         (const float *)(const void *)(tr + gt->off), gbias,
                         cfg.n_experts, cfg.hidden, state, scores);
                 ds4f_topk(scores, cfg.n_experts, cfg.topk, idx, w);
+                if (getenv("DS4F_DEBUG4")) {
+                    uint64_t ck = ds4f_mix64(0);
+                    for (int i = 0; i < cfg.hidden; i++) {
+                        uint32_t bits;
+                        memcpy(&bits, &state[i], 4);
+                        ck = ds4f_mix64(ck ^ bits);
+                    }
+                    fprintf(stderr, "[dbg4] t%d L%d scores %.6g %.6g %.6g %.6g"
+                            " idx %d%d%d stateck %016llx\n", t, L,
+                            (double)scores[0], (double)scores[1],
+                            (double)scores[2], (double)scores[3],
+                            idx[0], idx[1], idx[2],
+                            (unsigned long long)ck);
+                }
             } else {
                 /* hash-fallback layer: the trunk checksum feeds hstate,
                  * which drives the hash router. Only pay for it here —
@@ -282,7 +379,6 @@ int main(int argc, char **argv) {
 
             ds4f_cache_getmany(&cache, L, idx, cfg.topk, slots);
             if (use_real) {
-                const uint8_t *es[64];
                 for (int j = 0; j < cfg.topk; j++)
                     es[j] = ds4f_cache_slot(&cache, slots[j]);
                 if (ds4f_moe_step(&cfg, &tl, L, tr, &pl, es, idx, w,
@@ -290,6 +386,13 @@ int main(int argc, char **argv) {
                                   &n_matvec, &n_decode) != 0) {
                     fprintf(stderr, "moe step failed at layer %d\n", L);
                     return 2;
+                }
+                if (getenv("DS4F_DEBUG2")) {
+                    uint64_t ck = ds4f_mix64(0);
+                    for (int i = 0; i < cfg.hidden; i++)
+                        ck = ds4f_mix64(ck ^ (uint64_t)(state[i] * 1e6f));
+                    fprintf(stderr, "[dbg2] t%d L%d after moe  %016llx\n", t, L,
+                            (unsigned long long)ck);
                 }
             } else {
                 for (int j = 0; j < cfg.topk; j++) {
@@ -304,7 +407,25 @@ int main(int argc, char **argv) {
                 for (int j = 0; j < cfg.topk; j++)
                     fprintf(trf, "%d,%d\n", L, idx[j]);
         }
+        if (text_mode) {
+            if (ds4f_head_logits(&head, state, logits) != 0) {
+                fprintf(stderr, "head logits failed\n");
+                return 2;
+            }
+            int tok = ds4f_sample(logits, (int)head.dims[0], &rng);
+            printf("%s%d", t ? " " : "", tok);
+            fflush(stdout);
+            last_tok = tok;
+        }
+        if (getenv("DS4F_DEBUG")) {
+            uint64_t ck = ds4f_mix64(0);
+            for (int i = 0; i < cfg.hidden; i++)
+                ck = ds4f_mix64(ck ^ (uint64_t)(state[i] * 1e6f));
+            fprintf(stderr, "[dbg] token %d state ck %016llx\n", t,
+                    (unsigned long long)ck);
+        }
     }
+    if (text_mode) printf("\n");
     double dt = now_s() - t0;
     if (trf) fclose(trf);
 
@@ -366,6 +487,10 @@ int main(int argc, char **argv) {
 
     free(state);
     free(scratch);
+    free(logits);
+    free(pids);
+    ds4f_head_free(&head);
+    ds4f_embed_free(&embed);
     if (jscratch) {
         for (int k = 0; k < cfg.topk - 1; k++) free(jscratch[k]);
         free(jscratch);

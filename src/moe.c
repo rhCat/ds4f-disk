@@ -30,7 +30,7 @@ static char *read_file(const char *path, long *len_out) {
 static int dtype_of(const char *s, size_t n) {
     if (n == 3 && !memcmp(s, "F32", 3)) return 0;
     if (n == 2 && !memcmp(s, "I8", 2)) return 1;
-    if (n == 8 && !memcmp(s, "F8_E4M3", 8)) return 2;
+    if (n == 7 && !memcmp(s, "F8_E4M3", 7)) return 2;
     if (n == 4 && !memcmp(s, "BF16", 4)) return 4;
     return 3;
 }
@@ -302,6 +302,27 @@ int ds4f_trunk_layout_load(Ds4fTrunkLayout *tl, const char *path) {
     tl->t_off[tl->n_layers] = k;
     json_free(doc);
     free(buf);
+    /* Typed reads (F32/BF16) require aligned offsets: misaligned ones
+     * are UB that clang -O2 exploits (widened loads past the buffer,
+     * nondeterministic garbage). The converter pads to 8 B; refuse
+     * layouts that violate it (re-convert with the current tool). */
+    for (int i = 0; i < k; i++) {
+        Ds4fTrunkTensor *tt = &tl->t[i];
+        if (tt->dtype == 0 && (tt->off & 3)) {
+            fprintf(stderr,
+                    "trunk layout: F32 tensor %s at misaligned off %ld "
+                    "(re-convert: aligned packer required)\n",
+                    tt->name, tt->off);
+            return -1;
+        }
+        if (tt->dtype == 4 && (tt->off & 1)) {
+            fprintf(stderr,
+                    "trunk layout: BF16 tensor %s at misaligned off %ld "
+                    "(re-convert: aligned packer required)\n",
+                    tt->name, tt->off);
+            return -1;
+        }
+    }
     return 0;
 }
 

@@ -84,19 +84,24 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
     if (kvlat < 2 || kvhalf < 1 || H < 1) return -1;
     if (!kv || !kv->kv || token < 0 || token >= kv->max_tokens) return 0;
 
-    int maxd = H;
-    if (qlat > maxd) maxd = qlat;
-    if (qdim > maxd) maxd = qdim;
-    if (kvlat > maxd) maxd = kvlat;
-    float *buf = (float *)malloc((size_t)(3 * maxd + kvlat +
-                                          2 * (token + 1) + 1) * sizeof(float));
+    /* distinct buffers, no reuse: ql(qlat) q(qdim) outv(kvhalf)
+     * kvlat_buf(kvlat) scores(w) wgt(w) + H-width wo-chain temps
+     * (cha, chb, chc). The chain runs at H width -- reusing the
+     * latent-sized buffers overflowed them (garbage tokens). */
+    int w = token + 1;
+    float *buf = (float *)malloc((size_t)(qlat + qdim + kvhalf + kvlat +
+                                          2 * w + 3 * H + 1) *
+                                 sizeof(float));
     if (!buf) return -1;
     float *ql = buf;
     float *q = ql + qlat;
     float *outv = q + qdim;
     float *kvlat_buf = outv + kvhalf;
     float *scores = kvlat_buf + kvlat;
-    float *wgt = scores + (token + 1);
+    float *wgt = scores + w;
+    float *cha = wgt + w;
+    float *chb = cha + H;
+    float *chc = chb + H;
 
     /* kv latent, normed, cached */
     f8_matvec_t(tl, wkv, wkv_s, tr, kvlat, H, state, kvlat_buf);
@@ -148,11 +153,11 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
         for (int i = 0; i < kvhalf; i++) outv[i] += w * v2[i];
     }
 
-    /* output chain: wo_a -> wo_b -> wo_c, residual into state */
-    f8_matvec_t(tl, woa, woa_s, tr, H, kvhalf, outv, q);      /* reuse q */
-    f8_matvec_t(tl, wob, wob_s, tr, H, H, q, ql);             /* reuse ql */
-    f8_matvec_t(tl, woc, woc_s, tr, H, H, ql, outv);
-    for (int i = 0; i < H; i++) state[i] += outv[i];
+    /* output chain at H width: wo_a -> wo_b -> wo_c, residual */
+    f8_matvec_t(tl, woa, woa_s, tr, H, kvhalf, outv, cha);
+    f8_matvec_t(tl, wob, wob_s, tr, H, H, cha, chb);
+    f8_matvec_t(tl, woc, woc_s, tr, H, H, chb, chc);
+    for (int i = 0; i < H; i++) state[i] += chc[i];
 
     free(buf);
     return 0;
