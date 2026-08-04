@@ -716,7 +716,14 @@ int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
                 for (int i = 0; i < H; i++) state[i] += out[i];
             }
             up_ok = 1;
+        } else {
+            fprintf(stderr, "moe: up[%d] shape [%ld x %ld] unsupported "
+                            "(lat=%d d=%d) -- identity fallback\n",
+                    ui, (long)tl->t[ui].dims[0], (long)tl->t[ui].dims[1],
+                    Lat, D);
         }
+    } else if (ui >= 0) {
+        fprintf(stderr, "moe: up[%d] dtype/rank unsupported\n", ui);
     }
     if (!up_ok) {
         if (hc_ok) {
@@ -730,6 +737,19 @@ int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
                     mix[j] = s + C[j] * xin[i];
                 }
                 for (int j = 0; j < nhc; j++) state[j * H + i] = mix[j];
+            }
+            /* state-rescale to the layer-input RMS (same as the up_ok
+             * branch; the fallback must bound the state too) */
+            {
+                double t2 = 0.0;
+                for (int i = 0; i < nhc * H; i++)
+                    t2 += (double)state[i] * state[i];
+                float rms_s =
+                    sqrtf((float)(t2 / (double)(nhc * H))) + 1e-30f;
+                float sgain = rms_in / rms_s;
+                if (sgain > 0.0f && sgain < 1e30f)
+                    for (int i = 0; i < nhc * H; i++)
+                        state[i] *= sgain;
             }
         } else {
             for (int i = 0; i < H && i < Lat; i++) state[i] += acc[i];

@@ -217,7 +217,7 @@ doc = {"model": {"type": "BPE", "vocab": vocab,
 json.dump(doc, open(sys.argv[1], "w"), ensure_ascii=False)
 PY
 e2e_tok_pass=0
-for attempt in 1 2; do
+for attempt in 1 2 3; do
 if [ -s "$SYN/tok/tokenizer.json" ] \
    && A=$(./ds4f "$SYN/q" --trunk "$SYN/out/trunk.bin" \
         --offsets "$SYN/out/trunk.offsets" --pool "$SYN/q/pool-mxfp4.bin" \
