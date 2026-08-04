@@ -142,15 +142,28 @@ int ds4f_trunk_layout_load(Ds4fTrunkLayout *tl, const char *path) {
     }
     memset(tl, 0, sizeof *tl);
     tl->n_layers = (int)nl->inum;
+    if (tl->n_layers < 1 || tl->n_layers > DS4F_MAX_LAYERS) {
+        fprintf(stderr, "trunk layout: n_layers %d out of range\n",
+                tl->n_layers);
+        json_free(doc); free(buf);
+        return -1;
+    }
     for (int L = 0; L < DS4F_MAX_LAYERS; L++)
         tl->gate[L] = tl->down[L] = tl->up[L] = -1;
 
     int total = 0;
     for (int i = 0; i < ls->nchild; i++) {
         const JEntry *ly = &ls->child[i];
+        if (ly->type != 2 || !ly->child || ly->nchild < 1) {
+            fprintf(stderr, "trunk layout: layer entry %d malformed\n", i);
+            json_free(doc); free(buf);
+            return -1;
+        }
         const JEntry *tss = json_get(ly->child, ly->nchild, "tensors");
         if (tss && tss->type == 3) total += tss->nchild;
     }
+    fprintf(stderr, "trunk layout: %d layer entries, %d tensors total\n",
+            ls->nchild, total);
     tl->t = (Ds4fTrunkTensor *)calloc((size_t)total,
                                       sizeof(Ds4fTrunkTensor));
     tl->t_off = (int *)calloc((size_t)(tl->n_layers + 1), sizeof(int));
@@ -170,8 +183,25 @@ int ds4f_trunk_layout_load(Ds4fTrunkLayout *tl, const char *path) {
         if (!ly) continue;
         const JEntry *tss = json_get(ly->child, ly->nchild, "tensors");
         if (!tss || tss->type != 3) continue;
+        if (!tss->child && tss->nchild > 0) {
+            fprintf(stderr, "trunk layout: layer %d tensors array dangles\n", L);
+            json_free(doc); free(buf);
+            return -1;
+        }
         for (int i = 0; i < tss->nchild; i++) {
             const JEntry *e = &tss->child[i];
+            if (k >= total) {
+                fprintf(stderr, "trunk layout: tensor overflow at layer %d "
+                        "entry %d (k=%d total=%d)\n", L, i, k, total);
+                json_free(doc); free(buf);
+                return -1;
+            }
+            if (e->type != 2 || !e->child) {
+                fprintf(stderr, "trunk layout: layer %d tensor %d malformed\n",
+                        L, i);
+                json_free(doc); free(buf);
+                return -1;
+            }
             Ds4fTrunkTensor *tt = &tl->t[k++];
             const JEntry *nm = json_get(e->child, e->nchild, "n");
             const JEntry *dt = json_get(e->child, e->nchild, "dtype");
