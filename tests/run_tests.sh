@@ -25,7 +25,7 @@ for t in tests/test_*.c; do
     name="$(basename "$t" .c)"
     $CC $CFLAGS -o "build/$name" "$t" \
         src/cfg.c src/st.c src/trunk.c src/cache.c src/router.c src/mem.c \
-        src/kernels.c
+        src/kernels.c src/moe.c
     run "$name" "build/$name"
 done
 
@@ -98,6 +98,34 @@ if python3 tools/convert-ds4f.py quantize "$SYN/wrap" --out "$SYN/q" \
     pass=$((pass + 1))
 else
     echo "FAIL e2e_quantize"
+    fail=$((fail + 1))
+fi
+
+# e2e_moe (issue #2 step 3): real router + mxfp4 matvec compute.
+# Same run twice: byte-identical state dumps prove determinism; the
+# report must show real matvecs and no drops; dump must be non-empty.
+if [ -s "$SYN/out/trunk.json" ] \
+   && ./ds4f "$SYN/q" --trunk "$SYN/out/trunk.bin" \
+        --offsets "$SYN/out/trunk.offsets" --pool "$SYN/q/pool-mxfp4.bin" \
+        --layout-trunk "$SYN/out/trunk.json" \
+        --layout-pool "$SYN/q/pool-mxfp4.json" \
+        --gen 3 --cache-gb 1 --dump-state "$SYN/dump1.bin" \
+        >"$SYN/moe1.log" 2>&1 \
+   && ./ds4f "$SYN/q" --trunk "$SYN/out/trunk.bin" \
+        --offsets "$SYN/out/trunk.offsets" --pool "$SYN/q/pool-mxfp4.bin" \
+        --layout-trunk "$SYN/out/trunk.json" \
+        --layout-pool "$SYN/q/pool-mxfp4.json" \
+        --gen 3 --cache-gb 1 --dump-state "$SYN/dump2.bin" \
+        >"$SYN/moe2.log" 2>&1 \
+   && cmp -s "$SYN/dump1.bin" "$SYN/dump2.bin" \
+   && grep -q 'router: real matvec on 2/2' "$SYN/moe1.log" \
+   && grep -q 'moe: .* matvecs' "$SYN/moe1.log" \
+   && grep -q '0 dropped' "$SYN/moe1.log" \
+   && [ "$(wc -c < "$SYN/dump1.bin")" -gt 0 ]; then
+    echo "PASS e2e_moe"
+    pass=$((pass + 1))
+else
+    echo "FAIL e2e_moe"
     fail=$((fail + 1))
 fi
 

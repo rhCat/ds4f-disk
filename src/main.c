@@ -5,6 +5,8 @@
  * Exit codes: 0 ok; 1 config/usage; 2 I/O; 4 completed with dropped
  * experts (silent numerical corruption must not exit 0). */
 #include "ds4f/ds4f.h"
+#include "ds4f/kernels.h"
+#include "ds4f/moe.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -22,6 +24,9 @@ static void usage(const char *argv0) {
         "  --offsets FILE      trunk offset table (trunk.offsets)\n"
         "  --pool FILE         packed expert pool (tools/convert-ds4f.py);\n"
         "                      when given, model.safetensors is not needed\n"
+        "  --layout-trunk FILE trunk.json tensor layout (enables real MoE)\n"
+        "  --layout-pool FILE  pool-mxfp4.json tensor layout (real MoE)\n"
+        "  --dump-state FILE   write final hidden state (fp32) after run\n"
         "  --cache-gb X        expert cache budget in GB       (default 8)\n"
         "  --trunk-gb X        trunk pin budget in GB          (default 4)\n"
         "  --pin-layers N      explicit pinned trunk prefix    (default auto)\n"
@@ -45,6 +50,7 @@ static double now_s(void) {
 int main(int argc, char **argv) {
     const char *model_dir = NULL, *trunk_path = NULL, *off_path = NULL;
     const char *trace_path = NULL, *prompt = "ds4f", *pool_path = NULL;
+    const char *tl_path = NULL, *pl_path = NULL, *dump_path = NULL;
     double cache_gb = 8.0, trunk_gb = 4.0, locality = 0.0;
     int pin_layers = -1, nring = 2, gen = 4, threads = 4, refuse = 1;
     for (int i = 1; i < argc; i++) {
@@ -65,6 +71,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--trunk") && i + 1 < argc) trunk_path = argv[++i];
         else if (!strcmp(argv[i], "--offsets") && i + 1 < argc) off_path = argv[++i];
         else if (!strcmp(argv[i], "--pool") && i + 1 < argc) pool_path = argv[++i];
+        else if (!strcmp(argv[i], "--layout-trunk") && i + 1 < argc) tl_path = argv[++i];
+        else if (!strcmp(argv[i], "--layout-pool") && i + 1 < argc) pl_path = argv[++i];
+        else if (!strcmp(argv[i], "--dump-state") && i + 1 < argc) dump_path = argv[++i];
         else if (!strcmp(argv[i], "--no-refuse")) refuse = 0;
         else if (!model_dir) model_dir = argv[i];
         else { usage(argv[0]); return 1; }
@@ -72,6 +81,10 @@ int main(int argc, char **argv) {
     if (!model_dir || !trunk_path || !off_path) { usage(argv[0]); return 1; }
     if (gen < 1) gen = 1;
     if (nring < 2) nring = 2;
+    if ((tl_path || pl_path) && !pool_path) {
+        fprintf(stderr, "--layout-* requires --pool\n");
+        return 1;
+    }
 
     Ds4fCfg cfg;
     if (ds4f_cfg_load(&cfg, model_dir) != 0) return 1;
@@ -148,8 +161,42 @@ int main(int argc, char **argv) {
         fprintf(trf, "# expert_bytes=%lld\n", (long long)cfg.expert_nbytes);
     }
 
-    uint64_t state = ds4f_mix64(0);
-    for (const char *p = prompt; *p; p++) state = ds4f_mix64(state ^ (uint8_t)*p);
+    /* real MoE mode: both layouts present and the pool is mxfp4 */
+    Ds4fTrunkLayout tl;
+    Ds4fPoolLayout pl;
+    int moe_mode = 0;
+    float *state = NULL, *scratch = NULL;
+    long scratch_n = 0;
+    int64_t n_matvec = 0, n_decode = 0;
+    if (tl_path && pl_path) {
+        if (ds4f_trunk_layout_load(&tl, tl_path) != 0) return 1;
+        if (ds4f_pool_layout_load(&pl, pl_path, &cfg) != 0) return 1;
+        moe_mode = 1;
+        scratch_n = pl.max_rc;
+        scratch = (float *)malloc((size_t)scratch_n * sizeof(float));
+        if (!scratch) return 2;
+        plan.state_b += (double)scratch_n * 4.0;
+        plan.need_b = plan.trunk_pin_b + plan.trunk_ring_b + plan.cache_b +
+                      plan.shared_b + plan.state_b + plan.index_b;
+        int nreal = 0;
+        for (int L = 0; L < cfg.n_layers; L++)
+            if (tl.gate[L] >= 0) nreal++;
+        fprintf(stderr, "router: real matvec on %d/%d layers, "
+                        "others hash fallback\n", nreal, cfg.n_layers);
+    }
+
+    uint64_t hstate = ds4f_mix64(0);
+    for (const char *p = prompt; *p; p++)
+        hstate = ds4f_mix64(hstate ^ (uint8_t)*p);
+
+    if (moe_mode) {
+        state = (float *)malloc((size_t)cfg.hidden * sizeof(float));
+        if (!state) return 2;
+        for (int i = 0; i < cfg.hidden; i++) {
+            uint64_t h = ds4f_mix64(hstate ^ ds4f_mix64((uint64_t)i));
+            state[i] = (float)((double)((int64_t)(h % 1000)) / 100.0 - 5.0);
+        }
+    }
 
     int idx[64];
     float w[64];
@@ -160,19 +207,62 @@ int main(int argc, char **argv) {
         for (int L = 0; L < cfg.n_layers; L++) {
             const uint8_t *tr = ds4f_trunk_bind(&trunk, L);
             if (!tr) { fprintf(stderr, "trunk bind failed at layer %d\n", L); return 2; }
-            state = ds4f_mix64(state ^ ds4f_checksum(tr, trunk.lay[L].nbytes));
+            hstate = ds4f_mix64(hstate ^ ds4f_checksum(tr, trunk.lay[L].nbytes));
 
-            ds4f_router(idx, w, &cfg, state, L, locality);
-            ds4f_cache_getmany(&cache, L, idx, cfg.topk, slots);
-            for (int j = 0; j < cfg.topk; j++) {
-                const uint8_t *es = ds4f_cache_slot(&cache, slots[j]);
-                if (es) state = ds4f_mix64(state ^ ds4f_checksum(es, cfg.expert_nbytes));
-                if (trf) fprintf(trf, "%d,%d\n", L, idx[j]);
+            int use_real = moe_mode && tl.gate[L] >= 0;
+            if (use_real) {
+                const Ds4fTrunkTensor *gt = &tl.t[tl.gate[L]];
+                float scores[256];
+                ds4f_router_scores(
+                    (const float *)(const void *)(tr + gt->off), NULL,
+                    cfg.n_experts, cfg.hidden, state, scores);
+                ds4f_topk(scores, cfg.n_experts, cfg.topk, idx, w);
+            } else {
+                ds4f_router(idx, w, &cfg, hstate, L, locality);
             }
+
+            ds4f_cache_getmany(&cache, L, idx, cfg.topk, slots);
+            if (use_real) {
+                const uint8_t *es[64];
+                for (int j = 0; j < cfg.topk; j++)
+                    es[j] = ds4f_cache_slot(&cache, slots[j]);
+                if (ds4f_moe_step(&cfg, &tl, L, tr, &pl, es, idx, w,
+                                  state, scratch, scratch_n,
+                                  &n_matvec, &n_decode) != 0) {
+                    fprintf(stderr, "moe step failed at layer %d\n", L);
+                    return 2;
+                }
+            } else {
+                for (int j = 0; j < cfg.topk; j++) {
+                    const uint8_t *es = ds4f_cache_slot(&cache, slots[j]);
+                    if (es)
+                        hstate = ds4f_mix64(hstate ^
+                            ds4f_checksum(es, cfg.expert_nbytes));
+                    if (trf) fprintf(trf, "%d,%d\n", L, idx[j]);
+                }
+            }
+            if (trf && use_real)
+                for (int j = 0; j < cfg.topk; j++)
+                    fprintf(trf, "%d,%d\n", L, idx[j]);
         }
     }
     double dt = now_s() - t0;
     if (trf) fclose(trf);
+
+    if (dump_path && moe_mode) {
+        int bad = 0;
+        for (int i = 0; i < cfg.hidden; i++)
+            if (!(state[i] == state[i]) || state[i] > 1e30f ||
+                state[i] < -1e30f) { bad = 1; break; }
+        if (bad) {
+            fprintf(stderr, "REFUSE: final state not finite, not dumping\n");
+            return 2;
+        }
+        FILE *df = fopen(dump_path, "wb");
+        if (!df) { fprintf(stderr, "cannot open %s\n", dump_path); return 2; }
+        fwrite(state, sizeof(float), (size_t)cfg.hidden, df);
+        fclose(df);
+    }
 
     int64_t read_b = trunk.nread + cache.nread;
     double gb_tok = (double)read_b / 1e9 / (double)gen;
@@ -187,6 +277,7 @@ int main(int argc, char **argv) {
             "%d tokens in %.1f s, %.2f s/token\n"
             "GB read per token: %.2f  (trunk %lld MB, experts %lld MB)\n"
             "cache: %lld requests, %lld hits (%.1f%%), %lld dropped\n"
+            "%s"
             "PEAK RSS: %.2f GB (measured, not the forecast)\n",
             cfg.n_layers, cfg.n_experts, cfg.topk, (long long)cfg.expert_nbytes,
             pool_src,
@@ -198,6 +289,7 @@ int main(int argc, char **argv) {
             (long long)(cache.nread / (1 << 20)),
             (long long)cache.nreq, (long long)cache.nhit, hit * 100.0,
             (long long)cache.ndrop,
+            moe_mode ? "moe: real matvec compute (kernels)\n" : "",
             (double)ds4f_peak_rss() / 1e9);
 
     int rc = 0;
@@ -208,7 +300,12 @@ int main(int argc, char **argv) {
                 "run as failed.\n", (long long)cache.ndrop);
         rc = 4;
     }
+    if (moe_mode)
+        fprintf(stderr, "moe: %lld matvecs, %lld decoded elements\n",
+                (long long)n_matvec, (long long)n_decode);
 
+    free(state);
+    free(scratch);
     ds4f_cache_free(&cache);
     ds4f_trunk_close(&trunk);
     free(pool.ref);

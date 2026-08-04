@@ -44,3 +44,13 @@ void ds4f_router_scores(const float *W, const float *bias, int E, int H,
         scores[e] = acc + (bias ? bias[e] : 0.0f);
     }
 }
+
+void ds4f_f32_matvec(const float *W, int R, int C, const float *x,
+                     float *y) {
+    for (int r = 0; r < R; r++) {
+        float acc = 0.0f;
+        const float *wr = W + (size_t)r * C;
+        for (int c = 0; c < C; c++) acc += wr[c] * x[c];
+        y[r] = acc;
+    }
+}

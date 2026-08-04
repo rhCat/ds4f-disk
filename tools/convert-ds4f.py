@@ -433,18 +433,27 @@ def cmd_convert(dirpath, outdir):
     put_u64(toff, len(layers))
     buf = bytearray(1 << 20)
     at = 0
+    trunk_layout = {"n_layers": len(layers), "layers": []}
     for L in layers:
         tens = sorted(dense[L])
         lay_bytes = sum(t[3] for t in tens)
         put_u64(toff, at)
         put_u64(toff, lay_bytes)
+        rel = 0
+        ltens = []
         for t in tens:
             f, off, nb = src(t[0])
             copy_range(f, off, nb, tbin, buf)
+            ltens.append({"n": t[0], "dtype": t[4], "shape": list(t[5]),
+                          "off": rel, "nbytes": nb})
+            rel += nb
+        trunk_layout["layers"].append({"layer": L, "tensors": ltens})
         at += lay_bytes
         print(f"  trunk layer {L}: {hsize(lay_bytes)}")
     tbin.close()
     toff.close()
+    with open(os.path.join(outdir, "trunk.json"), "w") as f:
+        json.dump(trunk_layout, f, indent=1)
     print(f"trunk.bin {hsize(at)} ({len(layers)} layers)")
 
     # ---------------- pool.bin ----------------
@@ -525,6 +534,8 @@ def cmd_make_synthetic(dirpath):
             f"layers.{L}.attn.wq_a.weight",
             f"layers.{L}.attn.wq_a.scale",
             f"layers.{L}.ffn.gate",
+            f"layers.{L}.ffn.down",
+            f"layers.{L}.ffn.up",
             f"layers.{L}.ffn.shared_experts.w1.weight",
             f"layers.{L}.ffn.shared_experts.w1.scale",
             f"layers.{L}.ffn.shared_experts.w2.weight",
@@ -540,7 +551,29 @@ def cmd_make_synthetic(dirpath):
     names += [f"mtp.{m}.hc_attn_base" for m in range(1)]
     names += [f"mtp.0.ffn.experts.0.w1.weight", f"mtp.0.ffn.experts.0.w1.scale"]
 
-    def blob(name, n):
+    def blob(name, n, dtype):
+        if dtype == "F32":             # valid bounded floats, not raw bytes
+            out = bytearray()
+            x = 0x1234
+            for i in range(n // 4):
+                x = (x * 1103515245 + 12345) & 0x7FFFFFFF
+                v = ((x & 0xFFFF) / 65535.0 - 0.5) * 2.0   # [-1, 1]
+                out += struct.pack("<f", v)
+            return bytes(out)
+        if dtype == "F8_E8M0":         # tiny scales: 2^-10 .. 2^-7
+            out = bytearray()
+            x = 0x1234
+            for i in range(n):
+                x = (x * 1103515245 + 12345) & 0x7FFFFFFF
+                out.append(117 + (x & 0x03))
+            return bytes(out)
+        if dtype == "I8":              # small weights: int8 in [-4, 4]
+            out = bytearray()
+            x = 0x1234
+            for i in range(n):
+                x = (x * 1103515245 + 12345) & 0x7FFFFFFF
+                out.append(((x & 0x7) - 4) & 0xFF)
+            return bytes(out)
         x = 0x1234
         out = bytearray()
         for i in range(n):
@@ -550,20 +583,37 @@ def cmd_make_synthetic(dirpath):
 
     sizes = {}
     for i, name in enumerate(names):
-        if "experts." in name and name.endswith(".scale"):
-            sizes[name] = 4            # F8_E8M0, one per 16 elems (block16)
-        elif "experts." in name:
-            sizes[name] = 64           # I8, 64 elements
+        if "experts." in name:
+            w = int(name.split("w")[1].split(".")[0])   # 1, 2 or 3
+            if name.endswith(".scale"):
+                sizes[name] = {1: 8, 2: 16, 3: 8}[w]    # block16 scales
+            else:
+                sizes[name] = {1: 128, 2: 256, 3: 128}[w]  # I8, 2-D
+        elif name.endswith("ffn.gate"):
+            sizes[name] = 128            # [4 x 8] F32
+        elif name.endswith("ffn.down"):
+            sizes[name] = 256            # [8 x 8] F32
+        elif name.endswith("ffn.up"):
+            sizes[name] = 256            # [8 x 8] F32
         elif "shared_experts" in name and name.endswith(".scale"):
             sizes[name] = 4
         elif "shared_experts" in name:
             sizes[name] = 24
         elif "embed" in name:
             sizes[name] = 96
-        elif name.endswith("gate"):
-            sizes[name] = 16
         else:
             sizes[name] = 32 + (i % 3) * 16
+
+    # 2-D shapes so the engine's matvec chain has real dims
+    shape_of = {}
+    for L in range(2):
+        shape_of[f"layers.{L}.ffn.gate"] = [4, 8]
+        shape_of[f"layers.{L}.ffn.down"] = [8, 8]
+        shape_of[f"layers.{L}.ffn.up"] = [8, 8]
+        for e in range(4):
+            shape_of[f"layers.{L}.ffn.experts.{e}.w1.weight"] = [16, 8]
+            shape_of[f"layers.{L}.ffn.experts.{e}.w2.weight"] = [16, 16]
+            shape_of[f"layers.{L}.ffn.experts.{e}.w3.weight"] = [8, 16]
 
     n_shards = 2
     wm = {}
@@ -572,11 +622,8 @@ def cmd_make_synthetic(dirpath):
         payload = b""
         entries = {}
         for name in snames:
-            a = len(payload)
-            data = blob(name, sizes[name])
-            payload += data
             if name.endswith(".scale") and "experts." in name:
-                dt, n = "F8_E8M0", 4    # real checkpoint: E8M0 per-16 block scales
+                dt, n = "F8_E8M0", sizes[name]  # real ckpt: E8M0 per-16 scales
             elif name.endswith(".scale"):
                 dt, n = "F32", 1
             elif ".weight" in name and ("experts" in name
@@ -584,7 +631,10 @@ def cmd_make_synthetic(dirpath):
                 dt, n = "I8", sizes[name]   # real checkpoint: I8 + scales
             else:
                 dt, n = "F32", sizes[name] // 4
-            entries[name] = {"dtype": dt, "shape": [n],
+            a = len(payload)
+            data = blob(name, sizes[name], dt)
+            payload += data
+            entries[name] = {"dtype": dt, "shape": shape_of.get(name, [n]),
                              "data_offsets": [a, a + sizes[name]]}
             wm[name] = f"model-0000{s + 1}-of-0000{n_shards}.safetensors"
         hdr = json.dumps(entries).encode()

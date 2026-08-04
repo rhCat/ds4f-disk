@@ -167,30 +167,41 @@ static JEntry *j_value(JDoc *d, const char **pp, const char *end) {
         return e;
     }
     if (*p == '[') {
-        JEntry *e = j_new(d);
-        if (!e) return NULL;
-        int e_i = d->npool - 1;
-        e->type = 3;
         p++;
         int n = 0;
-        while (1) {
+        /* pass 1: count elements (allocations are garbage, counted --
+         * same path as j_object, so the dry-run preallocation holds) */
+        {
+            const char *q = p;
+            while (1) {
+                q = j_ws(q, end);
+                if (q >= end) return NULL;
+                if (*q == ']') break;
+                if (!j_value(d, &q, end)) return NULL;
+                n++;
+                q = j_ws(q, end);
+                if (q >= end) return NULL;
+                if (*q == ',') { q++; continue; }
+                if (*q == ']') break;
+                return NULL;
+            }
+        }
+        JEntry *e = j_new(d);
+        if (!e) return NULL;
+        e->type = 3;
+        int base = j_reserve(d, n);
+        if (base < 0) return NULL;
+        e->child = &d->pool[base];
+        e->nchild = n;
+        for (int i = 0; i < n; i++) {
             p = j_ws(p, end);
-            if (p >= end) return NULL;
-            if (*p == ']') { p++; break; }
             JEntry *v = j_value(d, &p, end);
             if (!v) return NULL;
-            n++;
+            d->pool[base + i] = *v;     /* element COPY into the block */
             p = j_ws(p, end);
-            if (p >= end) return NULL;
-            if (*p == ',') { p++; continue; }
-            if (*p == ']') { p++; break; }
-            return NULL;
+            if (p < end && *p == ',') p++;
         }
-        /* array elements must be scalars (our shapes are arrays of
-         * numbers); they are contiguous right after the array entry */
-        e = &d->pool[e_i];
-        e->nchild = n;
-        e->child  = &d->pool[e_i + 1];
+        if (p < end && *p == ']') p++;
         *pp = p;
         return e;
     }
