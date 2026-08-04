@@ -40,9 +40,17 @@ ALIASES = {
 }
 REQUIRED = ["n_layers", "n_experts", "topk", "n_shared", "hidden"]
 
-EXPERT_RE = re.compile(r"\.layers\.(\d+)\.(?:mlp\.)?experts\.(\d+)\.(.+)$")
-SHARED_RE = re.compile(r"\.layers\.(\d+)\.(?:mlp\.)?shared_expert\.(.+)$")
-LAYER_RE = re.compile(r"^model\.layers\.(\d+)\.")
+EXPERT_RE = re.compile(r"(?:^|\.)layers\.(\d+)\.(?:mlp|ffn)\.experts\.(\d+)\.(.+)$")
+SHARED_RE = re.compile(r"(?:^|\.)layers\.(\d+)\.(?:mlp|ffn)\.shared_expert\.(.+)$")
+LAYER_RE = re.compile(r"^(?:model\.)?layers\.(\d+)\.")
+
+
+def skeleton(name):
+    """Name with every digit run collapsed to N, e.g.
+    layers.0.attn.wq_a.weight -> layers.N.attn.wq_a.weight. The
+    histogram of skeletons reveals a checkpoint's naming scheme at a
+    glance without dumping tens of thousands of names."""
+    return re.sub(r"\d+", "N", name)
 
 
 def hsize(n):
@@ -260,6 +268,15 @@ def cmd_inspect(dirpath):
         print(f"unclassified (embed/norm/lm_head/...): {hsize(ob)}")
         for t in other[:10]:
             print(f"  {t[0]} ({hsize(t[3])})")
+
+    # the naming scheme, at a glance: digit runs collapsed to N
+    from collections import Counter
+    skel = Counter(skeleton(n) for n in shards)
+    print("\nname skeletons (digits -> N), most common:")
+    for sk, cnt in skel.most_common(15):
+        print(f"  {cnt:7d}  {sk}")
+    if skel and len(skel) > 15:
+        print(f"  ... {len(skel) - 15} more skeletons")
 
     if eb:
         print(f"\nestimate: pool.bin {hsize(eb * len(experts))}, "
@@ -481,24 +498,25 @@ def cmd_make_synthetic(dirpath):
     with open(os.path.join(dirpath, "config.json"), "w") as f:
         json.dump(cfg, f, indent=2)
 
-    names = ["model.embed_tokens.weight", "model.norm.weight"]
+    names = ["embed.weight", "lm_head.weight"]
     for L in range(2):
         names += [
-            f"model.layers.{L}.self_attn.q_proj",
-            f"model.layers.{L}.self_attn.k_proj",
-            f"model.layers.{L}.self_attn.v_proj",
-            f"model.layers.{L}.self_attn.o_proj",
-            f"model.layers.{L}.mlp.gate",
-            f"model.layers.{L}.mlp.shared_expert.up_proj",
-            f"model.layers.{L}.mlp.shared_expert.down_proj",
+            f"layers.{L}.hc_attn_base",
+            f"layers.{L}.hc_ffn_base",
+            f"layers.{L}.attn.attn_sink",
+            f"layers.{L}.attn.wq_a.weight",
+            f"layers.{L}.attn.wq_a.scale",
+            f"layers.{L}.ffn.gate",
+            f"layers.{L}.ffn.shared_expert.up_proj",
+            f"layers.{L}.ffn.shared_expert.down_proj",
         ]
         for e in range(4):
             names += [
-                f"model.layers.{L}.mlp.experts.{e}.up_proj",
-                f"model.layers.{L}.mlp.experts.{e}.down_proj",
-                f"model.layers.{L}.mlp.experts.{e}.gate_proj",
+                f"layers.{L}.ffn.experts.{e}.up_proj",
+                f"layers.{L}.ffn.experts.{e}.down_proj",
+                f"layers.{L}.ffn.experts.{e}.gate_proj",
             ]
-    names += ["model.norm.weight", "lm_head.weight"]
+    names += ["norm.weight"]
 
     def blob(name, n):
         x = 0x1234
