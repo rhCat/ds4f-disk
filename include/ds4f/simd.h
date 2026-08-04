@@ -28,4 +28,16 @@ void ds4f_simd_mxfp4_matvec(const uint8_t *vals, const uint8_t *scales,
 void ds4f_simd_bf16_matvec(const uint16_t *W, int R, int C,
                            const float *x, const float *bias, float *y);
 
+/* SIMD matvecs (issue #6 step 4): I8 (int8 + optional E8M0 block
+ * scales) and F8_E4M3 (two-table decode + masked subnormal/inf fixup).
+ * The vector path is used when the scale blocks are 16-aligned
+ * (SC % 16 == 0) or a single per-row scale (SC == 1); otherwise the
+ * caller falls back to the scalar kernels.c path. */
+void ds4f_simd_i8_matvec(const uint8_t *W, const uint8_t *scales,
+                         int R, int C, int SR, int SC, const float *x,
+                         float *y);
+void ds4f_simd_f8_matvec(const uint8_t *W, const uint8_t *scales,
+                         int R, int C, int SR, int SC, const float *x,
+                         float *y);
+
 #endif /* DS4F_SIMD_H */

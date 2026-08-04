@@ -114,6 +114,15 @@ static void fp8_lut_build(void) {
 void ds4f_f8_matvec(const uint8_t *W, const uint8_t *scales,
                     int R, int C, int SR, int SC, const float *x,
                     float *y) {
+    /* SIMD when the scale blocks are 16-aligned: SC == 1 (per-row) or
+     * the block width C/SC is a multiple of 16. Otherwise scalar. */
+    if (ds4f_kernels_simd()) {
+        int ssc = SC < 1 ? 1 : SC;
+        if (ssc == 1 || (C % ssc == 0 && ((C / ssc) % 16) == 0)) {
+            ds4f_simd_f8_matvec(W, scales, R, C, SR, ssc, x, y);
+            return;
+        }
+    }
     if (!fp8_lut_ready) fp8_lut_build();
     if (SR < 1) SR = 1;
     if (SC < 1) SC = 1;
@@ -148,6 +157,13 @@ void ds4f_f8_decode_row(const uint8_t *W, const uint8_t *scales,
 void ds4f_i8_matvec(const uint8_t *W, const uint8_t *scales,
                     int R, int C, int SR, int SC, const float *x,
                     float *y) {
+    if (ds4f_kernels_simd()) {
+        int ssc = SC < 1 ? 1 : SC;
+        if (ssc == 1 || (C % ssc == 0 && ((C / ssc) % 16) == 0)) {
+            ds4f_simd_i8_matvec(W, scales, R, C, SR, ssc, x, y);
+            return;
+        }
+    }
     if (SR < 1) SR = 1;
     if (SC < 1) SC = 1;
     for (int r = 0; r < R; r++) {

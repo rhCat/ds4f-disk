@@ -61,6 +61,25 @@ static double bench_bf16(int simd, const uint16_t *W, int R, int C,
     return now_s() - t0;
 }
 
+static double bench_i8(int simd, const uint8_t *W, int R, int C,
+                       const float *x, int reps, float *scratch) {
+    ds4f_kernels_set_simd(simd);
+    double t0 = now_s();
+    for (int r = 0; r < reps; r++)
+        ds4f_i8_matvec(W, NULL, R, C, 1, 1, x, scratch);
+    return now_s() - t0;
+}
+
+static double bench_f8(int simd, const uint8_t *W, const uint8_t *scales,
+                       int R, int C, int SR, int SC, const float *x,
+                       int reps, float *scratch) {
+    ds4f_kernels_set_simd(simd);
+    double t0 = now_s();
+    for (int r = 0; r < reps; r++)
+        ds4f_f8_matvec(W, scales, R, C, SR, SC, x, scratch);
+    return now_s() - t0;
+}
+
 int main(int argc, char **argv) {
     int reps = argc > 1 ? atoi(argv[1]) : 3;
     if (reps < 1) reps = 1;
@@ -105,6 +124,41 @@ int main(int argc, char **argv) {
            (double)n * 2.0 / 1e9 / mv, ms / mv);
     printf("bf16    (%dx%d)   : scalar %.2f s, SIMD %.2f s (%.1fx)\n",
            Br, Bc, bbf, bsi, bbf / bsi);
+
+    /* head-shaped: 4096 x 4096 I8 (issue #6 step 4) */
+    {
+        int Hr = 4096, Hc = 4096;
+        uint8_t *Wi = (uint8_t *)malloc((size_t)Hr * Hc);
+        float *hs = (float *)malloc((size_t)Hr * sizeof(float));
+        for (int i = 0; i < Hr * Hc; i++)
+            Wi[i] = (uint8_t)((i * 7) & 0xFF);
+        double is = bench_i8(0, Wi, Hr, Hc, x, reps, hs);
+        double iv = bench_i8(1, Wi, Hr, Hc, x, reps, hs);
+        printf("i8      (%dx%d)   : scalar %.2f s, SIMD %.2f s, "
+               "%.2f GFLOP/s vs %.2f (%.1fx)\n",
+               Hr, Hc, is, iv, (double)Hr * Hc * 2.0 / 1e9 / is,
+               (double)Hr * Hc * 2.0 / 1e9 / iv, is / iv);
+        free(Wi); free(hs);
+    }
+
+    /* attention-shaped: 4096 x 4096 F8, per-32-col scales (issue #6) */
+    {
+        int Fr = 4096, Fc = 4096, Fsc = 32;
+        uint8_t *Wf = (uint8_t *)malloc((size_t)Fr * Fc);
+        uint8_t *fs = (uint8_t *)malloc((size_t)((Fr / 128) * Fsc));
+        float *hs = (float *)malloc((size_t)Fr * sizeof(float));
+        for (int i = 0; i < Fr * Fc; i++)
+            Wf[i] = (uint8_t)((i * 13) & 0xFF);
+        for (int i = 0; i < (Fr / 128) * Fsc; i++)
+            fs[i] = 117 + (uint8_t)(i & 7);
+        double fsc = bench_f8(0, Wf, fs, Fr, Fc, 128, Fsc, x, reps, hs);
+        double fsv = bench_f8(1, Wf, fs, Fr, Fc, 128, Fsc, x, reps, hs);
+        printf("f8      (%dx%d)   : scalar %.2f s, SIMD %.2f s, "
+               "%.2f GFLOP/s vs %.2f (%.1fx)\n",
+               Fr, Fc, fsc, fsv, (double)Fr * Fc * 2.0 / 1e9 / fsc,
+               (double)Fr * Fc * 2.0 / 1e9 / fsv, fsc / fsv);
+        free(Wf); free(fs); free(hs);
+    }
 
     free(vals); free(scales); free(x); free(scratch);
     free(Wb); free(bs);

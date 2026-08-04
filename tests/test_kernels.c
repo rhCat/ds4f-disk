@@ -275,5 +275,84 @@ int main(void) {
         }
     }
 
+    /* 10: I8 matvec vs naive (SIMD active; SC=1 and block scales) */
+    {
+        uint8_t W[8 * 64];
+        uint8_t sc[8 * 4];
+        float x[64];
+        srand(42);
+        for (int i = 0; i < 8 * 64; i++) W[i] = (uint8_t)(rand() % 256);
+        for (int i = 0; i < 8 * 4; i++) sc[i] = 117 + (uint8_t)(rand() % 8);
+        for (int i = 0; i < 64; i++) x[i] = (float)(rand() % 100) / 50.0f - 1.0f;
+        float y1[8], y2[8];
+        ds4f_kernels_set_simd(1);
+        /* per-row scale (SC=1, SR=1) */
+        ds4f_i8_matvec(W, sc, 8, 64, 1, 1, x, y1);
+        for (int r = 0; r < 8; r++) {
+            float acc = 0.0f;
+            for (int c = 0; c < 64; c++)
+                acc += (float)(int8_t)W[r * 64 + c] *
+                       ds4f_e8m0_value(sc[0]) * x[c];
+            y2[r] = acc;
+        }
+        int ok = 1;
+        for (int r = 0; r < 8; r++)
+            if (fabsf(y1[r] - y2[r]) > 1e-3f * (1.0f + fabsf(y2[r]))) ok = 0;
+        /* block scales (SC=4 -> blocks of 16 cols, vector path) */
+        ds4f_i8_matvec(W, sc, 8, 64, 2, 4, x, y1);
+        for (int r = 0; r < 8; r++) {
+            int sr = (r * 2) / 8;
+            float acc = 0.0f;
+            for (int c = 0; c < 64; c++) {
+                int scc = (c * 4) / 64;
+                acc += (float)(int8_t)W[r * 64 + c] *
+                       ds4f_e8m0_value(sc[sr * 4 + scc]) * x[c];
+            }
+            y2[r] = acc;
+        }
+        for (int r = 0; r < 8; r++)
+            if (fabsf(y1[r] - y2[r]) > 1e-3f * (1.0f + fabsf(y2[r]))) ok = 0;
+        if (!ok) { printf("FAIL test 10 (i8 matvec)\n"); return 1; }
+        printf("PASS test 10 (i8 matvec vs naive)\n");
+    }
+
+    /* 11: F8 matvec SIMD vs scalar on edge-heavy bytes (subnormals,
+     * e=15 clamp, signs) */
+    {
+        uint8_t W[16 * 64];
+        uint8_t sc[16 * 2];
+        float x[64];
+        srand(7);
+        for (int i = 0; i < 16 * 64; i++) {
+            uint8_t v = (uint8_t)(rand() % 256);
+            if (i % 5 == 0) v &= 0x87;      /* force subnormals */
+            if (i % 7 == 0) v |= 0x78;      /* force e=15 */
+            W[i] = v;
+        }
+        for (int i = 0; i < 16 * 2; i++) sc[i] = 117 + (uint8_t)(rand() % 8);
+        for (int i = 0; i < 64; i++) x[i] = (float)(rand() % 200) / 100.0f - 1.0f;
+        float yv[16], ys[16];
+        ds4f_kernels_set_simd(1);
+        ds4f_f8_matvec(W, sc, 16, 64, 1, 1, x, yv);       /* vector */
+        ds4f_kernels_set_simd(0);
+        ds4f_f8_matvec(W, sc, 16, 64, 1, 1, x, ys);       /* scalar */
+        ds4f_kernels_set_simd(1);
+        int ok = 1;
+        /* edge-heavy bytes mix 448-magnitude and subnormal terms, so
+         * serial-vs-vector accumulation order differs at ~2e-4 rel;
+         * 1e-3 covers it (real data is normal-range, far tighter) */
+        for (int r = 0; r < 16; r++)
+            if (fabsf(yv[r] - ys[r]) > 1e-3f * (1.0f + fabsf(ys[r]))) ok = 0;
+        /* block scales SC=4 (16-col blocks), vector path */
+        ds4f_f8_matvec(W, sc, 16, 64, 2, 4, x, yv);
+        ds4f_kernels_set_simd(0);
+        ds4f_f8_matvec(W, sc, 16, 64, 2, 4, x, ys);
+        ds4f_kernels_set_simd(1);
+        for (int r = 0; r < 16; r++)
+            if (fabsf(yv[r] - ys[r]) > 1e-3f * (1.0f + fabsf(ys[r]))) ok = 0;
+        if (!ok) { printf("FAIL test 11 (f8 simd vs scalar)\n"); return 1; }
+        printf("PASS test 11 (f8 simd == scalar on edge bytes)\n");
+    }
+
     return 0;
 }
