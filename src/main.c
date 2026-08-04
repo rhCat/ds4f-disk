@@ -244,6 +244,25 @@ int main(int argc, char **argv) {
         }
         fprintf(stderr, "hc: mHC on %d/%d attn, %d/%d ffn\n",
                 nha, cfg.n_layers, nhf, cfg.n_layers);
+        for (int L = 0; L < 1 && L < cfg.n_layers; L++) {
+            int idx[3] = { tl.hc_attn_fn[L], tl.hc_attn_base[L],
+                           tl.hc_attn_scale[L] };
+            const char *nm[3] = { "attn_fn", "attn_base", "attn_scale" };
+            for (int k = 0; k < 3; k++)
+                if (idx[k] >= 0)
+                    fprintf(stderr, "hc L%d %s: dtype %d shape [%ld",
+                            L, nm[k], tl.t[idx[k]].dtype,
+                            (long)tl.t[idx[k]].dims[0]);
+            int idx2[3] = { tl.hc_ffn_fn[L], tl.hc_ffn_base[L],
+                            tl.hc_ffn_scale[L] };
+            const char *nm2[3] = { "ffn_fn", "ffn_base", "ffn_scale" };
+            for (int k = 0; k < 3; k++)
+                if (idx2[k] >= 0)
+                    fprintf(stderr, " L%d %s: dtype %d shape [%ld",
+                            L, nm2[k], tl.t[idx2[k]].dtype,
+                            (long)tl.t[idx2[k]].dims[0]);
+            fprintf(stderr, "\n");
+        }
     }
 
     uint64_t hstate = ds4f_mix64(0);
@@ -385,8 +404,12 @@ int main(int argc, char **argv) {
             int use_real = moe_mode && tl.gate[L] >= 0;
             /* MLA attention first: it reads/writes state, and the
              * router below sees the post-attention state (real order) */
-            if (use_real && kv_ok && !getenv("DS4F_SKIP_ATTN"))
-                ds4f_attn_step(&cfg, &tl, L, tr, state, &kvc, t);
+            if (use_real && kv_ok && !getenv("DS4F_SKIP_ATTN")) {
+                if (ds4f_attn_step(&cfg, &tl, L, tr, state, &kvc, t) != 0) {
+                    fprintf(stderr, "attn step failed at layer %d\n", L);
+                    return 2;
+                }
+            }
             if (getenv("DS4F_DEBUG2")) {
                 uint64_t ck = ds4f_mix64(0);
                 for (int i = 0; i < cfg.hidden; i++) {
