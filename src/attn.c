@@ -89,8 +89,11 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
      * (cha, chb, chc). The chain runs at H width -- reusing the
      * latent-sized buffers overflowed them (garbage tokens). */
     int w = token + 1;
-    float *buf = (float *)malloc((size_t)(qlat + qdim + kvhalf + kvlat +
-                                          2 * w + 3 * H + 1) *
+    /* calloc: any untouched tail (scores/wgt at short windows, or a
+     * skipped chain) must be zero, not malloc garbage -- the softmax
+     * and combine read them (determinism, issue #6 step 5). */
+    float *buf = (float *)calloc((size_t)(qlat + qdim + kvhalf + kvlat +
+                                          2 * w + 3 * H + 1),
                                  sizeof(float));
     if (!buf) return -1;
     float *ql = buf;

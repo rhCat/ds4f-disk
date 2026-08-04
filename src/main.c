@@ -9,6 +9,7 @@
 #include "ds4f/moe.h"
 #include "ds4f/attn.h"
 #include "ds4f/head.h"
+#include "ds4f/tokenizer.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -32,6 +33,8 @@ static void usage(const char *argv0) {
         "  --head FILE         head.json (logits; enables text mode)\n"
         "  --embed FILE        embed.json (embedding table; text mode)\n"
         "  --prompt-ids S      comma-separated token ids (first = seed)\n"
+        "  --tokenizer FILE    tokenizer.json (ids <-> text; decodes output)\n"
+        "  --text S            prompt text, encoded via --tokenizer\n"
         "  --cache-gb X        expert cache budget in GB       (default 8)\n"
         "  --trunk-gb X        trunk pin budget in GB          (default 4)\n"
         "  --pin-layers N      explicit pinned trunk prefix    (default auto)\n"
@@ -59,6 +62,7 @@ int main(int argc, char **argv) {
     const char *trace_path = NULL, *prompt = "ds4f", *pool_path = NULL;
     const char *tl_path = NULL, *pl_path = NULL, *dump_path = NULL;
     const char *head_path = NULL, *embed_path = NULL, *prompt_ids = NULL;
+    const char *tok_path = NULL, *text_arg = NULL;
     double cache_gb = 8.0, trunk_gb = 4.0, locality = 0.0;
     int pin_layers = -1, nring = 2, gen = 4, threads = 4, refuse = 1;
     for (int i = 1; i < argc; i++) {
@@ -85,6 +89,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--head") && i + 1 < argc) head_path = argv[++i];
         else if (!strcmp(argv[i], "--embed") && i + 1 < argc) embed_path = argv[++i];
         else if (!strcmp(argv[i], "--prompt-ids") && i + 1 < argc) prompt_ids = argv[++i];
+        else if (!strcmp(argv[i], "--tokenizer") && i + 1 < argc) tok_path = argv[++i];
+        else if (!strcmp(argv[i], "--text") && i + 1 < argc) text_arg = argv[++i];
         else if (!strcmp(argv[i], "--no-refuse")) refuse = 0;
         else if (!strcmp(argv[i], "--no-simd")) ds4f_kernels_set_simd(0);
         else if (!model_dir) model_dir = argv[i];
@@ -242,8 +248,15 @@ int main(int argc, char **argv) {
     int *pids = NULL;
     int npids = 0, text_mode = 0;
     uint64_t rng = hstate;
+    Ds4fTokenizer tok;
     memset(&head, 0, sizeof head);
     memset(&embed, 0, sizeof embed);
+    memset(&tok, 0, sizeof tok);
+    if (tok_path &&
+        ds4f_tokenizer_load(&tok, tok_path) != 0) {
+        fprintf(stderr, "tokenizer load failed\n");
+        return 1;
+    }
     if (head_path && embed_path) {
         if (ds4f_head_load(&head, head_path) != 0 ||
             ds4f_embed_load(&embed, embed_path) != 0) {
@@ -253,7 +266,27 @@ int main(int argc, char **argv) {
         long V = head.dims[0];
         logits = (float *)malloc((size_t)V * sizeof(float));
         if (!logits) return 2;
-        if (prompt_ids) {
+        if (text_arg) {
+            /* --text: encode the prompt with the tokenizer */
+            if (tok_path == NULL) {
+                fprintf(stderr, "--text requires --tokenizer\n");
+                return 2;
+            }
+            int tmp[512];
+            int n = ds4f_tokenizer_encode(&tok, text_arg, tmp, 512);
+            if (n <= 0) {
+                fprintf(stderr, "prompt encode failed\n");
+                return 2;
+            }
+            pids = (int *)malloc((size_t)n * sizeof(int));
+            if (!pids) return 2;
+            for (int i = 0; i < n; i++) pids[i] = tmp[i];
+            npids = n;
+            fprintf(stderr, "prompt ids: %d", n);
+            for (int i = 0; i < n; i++)
+                fprintf(stderr, " %d", pids[i]);
+            fprintf(stderr, "\n");
+        } else if (prompt_ids) {
             char *dup = strdup(prompt_ids);
             char *save = NULL;
             for (char *tok = strtok_r(dup, ",", &save); tok;
@@ -412,10 +445,18 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "head logits failed\n");
                 return 2;
             }
-            int tok = ds4f_sample(logits, (int)head.dims[0], &rng);
-            printf("%s%d", t ? " " : "", tok);
-            fflush(stdout);
-            last_tok = tok;
+            int tokid = ds4f_sample(logits, (int)head.dims[0], &rng);
+            if (tok_path) {
+                char tbuf[256];
+                int tl = ds4f_tokenizer_decode(&tok, &tokid, 1, tbuf, 256);
+                (void)tl;
+                printf("%s", tbuf);
+                fflush(stdout);
+            } else {
+                printf("%s%d", t ? " " : "", tokid);
+                fflush(stdout);
+            }
+            last_tok = tokid;
         }
         if (getenv("DS4F_DEBUG")) {
             uint64_t ck = ds4f_mix64(0);
@@ -491,6 +532,7 @@ int main(int argc, char **argv) {
     free(pids);
     ds4f_head_free(&head);
     ds4f_embed_free(&embed);
+    ds4f_tokenizer_free(&tok);
     if (jscratch) {
         for (int k = 0; k < cfg.topk - 1; k++) free(jscratch[k]);
         free(jscratch);

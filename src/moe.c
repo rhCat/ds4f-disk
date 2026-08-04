@@ -361,8 +361,12 @@ typedef struct {
 
 static void *exp_run(void *arg) {
     ExpJob *j = (ExpJob *)arg;
-    float *cur = (float *)malloc((size_t)j->D * sizeof(float));
-    float *tmp = (float *)malloc((size_t)j->D * sizeof(float));
+    /* calloc: the chain tail (clen < Lat) is stale after the last
+     * matvec; zero-init makes the combine deterministic regardless of
+     * heap layout (uninit tails caused run-to-run token variation on
+     * macOS, issue #6 step 5). */
+    float *cur = (float *)calloc((size_t)j->D, sizeof(float));
+    float *tmp = (float *)calloc((size_t)j->D, sizeof(float));
     if (!cur || !tmp) { free(cur); free(tmp); j->fail = 1; return NULL; }
     memcpy(cur, j->latent, (size_t)j->Lat * sizeof(float));
     long clen = j->Lat;
@@ -409,9 +413,9 @@ int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
     for (int i = 0; i < H; i++) ss_in += (double)state[i] * state[i];
     float rms_in = sqrtf((float)(ss_in / (double)H));
 
-    float *latent = (float *)malloc((size_t)D * sizeof(float));
-    float *cur    = (float *)malloc((size_t)D * sizeof(float));
-    float *out    = (float *)malloc((size_t)D * sizeof(float));
+    float *latent = (float *)calloc((size_t)D, sizeof(float));
+    float *cur    = (float *)calloc((size_t)D, sizeof(float));
+    float *out    = (float *)calloc((size_t)D, sizeof(float));
     float *acc    = (float *)calloc((size_t)D, sizeof(float));
     if (!latent || !cur || !out || !acc) {
         free(latent); free(cur); free(out); free(acc);
@@ -452,7 +456,7 @@ int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
         jb->el = &pl->exp[(size_t)L * pl->n_experts + sel[j]];
         jb->slot = es[j];
         jb->latent = latent;
-        jb->out = (float *)malloc((size_t)Lat * sizeof(float));
+        jb->out = (float *)calloc((size_t)Lat, sizeof(float));
         /* job 0 reuses the caller's warm scratch; the rest come from
          * the caller's pool -- never malloc per call (page faults). */
         jb->scratch = (njob == 0) ? scratch : job_scratch[njob - 1];
@@ -505,6 +509,10 @@ int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
             ds4f_f32_matvec((const float *)(const void *)(tr + tl->t[ui].off),
                             (int)R, (int)C, acc, out);
             (*n_matvec)++;
+            /* a short up matvec (R < H) leaves out[R..H) untouched:
+             * zero it so state += out is deterministic (the tail must
+             * not be malloc garbage) */
+            if (R < H) memset(out + R, 0, (size_t)(H - R) * sizeof(float));
             for (int i = 0; i < H; i++) state[i] += out[i];
             up_ok = 1;
         }
