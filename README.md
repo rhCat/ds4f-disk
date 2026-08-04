@@ -114,9 +114,12 @@ structure at real scale; kernels are roadmap.
 - [x] Scalar mxfp4 kernels: decode / matvec / router scores
       (src/kernels.c, fixture-gated: known vectors, round trip,
       matvec + router vs reference)
-- [ ] Pipeline: async expert fetch overlapping compute; real router
-      wiring (needs trunk tensor layout manifest from the converter)
+- [x] Real compute path: trunk.json/pool-mxfp4.json layouts, real
+      router matvec, mxfp4 expert chain, --dump-state
+      (src/moe.c; json.h now parses arrays of objects)
 - [ ] SIMD: AVX2 / NEON paths, bit-identical vs scalar on fixtures
+- [ ] GPU compute backend (weighs: PCIe weight streaming; int8 tensor
+      cores on the ORIGINAL I8 pool vs mxfp4 decode; DSpark overlap)
 - [ ] DSpark synergy: draft pass as a free prefetch for the target pass
 - [ ] Hash-map cache lookup at full slot counts (linear scan is fine at
       fixture scale)
