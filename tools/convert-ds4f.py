@@ -535,6 +535,8 @@ def cmd_make_synthetic(dirpath):
             f"layers.{L}.attn.kv_norm.weight",
             f"layers.{L}.attn.wq_a.weight",
             f"layers.{L}.attn.wq_a.scale",
+            f"layers.{L}.attn.wq_b.weight",
+            f"layers.{L}.attn.wq_b.scale",
             f"layers.{L}.attn.wkv.weight",
             f"layers.{L}.attn.wkv.scale",
             f"layers.{L}.attn.wo_a.weight",
@@ -627,12 +629,14 @@ def cmd_make_synthetic(dirpath):
             sizes[name] = 512            # [8 x 64] F8_E4M3
         elif name == "head.scale":
             sizes[name] = 1              # [1 x 1] F8_E8M0
+        elif name.endswith("attn.attn_sink"):
+            sizes[name] = 256            # [64] F32, sink anchors
         elif name.endswith("q_norm.weight") or name.endswith("kv_norm.weight"):
             sizes[name] = 8              # [4] BF16
         elif "attn." in name and name.endswith(".weight"):
             w = name.split(".")[-2]
-            sizes[name] = {"wq_a": 32, "wkv": 32, "wo_a": 32,
-                           "wo_b": 64, "wo_c": 32}[w]   # F8, 2-D
+            sizes[name] = {"wq_a": 32, "wq_b": 16, "wkv": 32, "wo_a": 16,
+                           "wo_b": 64, "wo_c": 64}[w]   # F8, 2-D
         elif "attn." in name and name.endswith(".scale"):
             sizes[name] = 1              # [1 x 1] F8_E8M0
         else:
@@ -643,9 +647,11 @@ def cmd_make_synthetic(dirpath):
     for L in range(2):
         shape_of[f"layers.{L}.attn.wq_a.weight"] = [4, 8]
         shape_of[f"layers.{L}.attn.wq_a.scale"] = [1, 1]
+        shape_of[f"layers.{L}.attn.wq_b.weight"] = [4, 4]
+        shape_of[f"layers.{L}.attn.wq_b.scale"] = [1, 1]
         shape_of[f"layers.{L}.attn.wkv.weight"] = [4, 8]
         shape_of[f"layers.{L}.attn.wkv.scale"] = [1, 1]
-        shape_of[f"layers.{L}.attn.wo_a.weight"] = [8, 4]
+        shape_of[f"layers.{L}.attn.wo_a.weight"] = [8, 2]
         shape_of[f"layers.{L}.attn.wo_a.scale"] = [1, 1]
         shape_of[f"layers.{L}.attn.wo_b.weight"] = [8, 8]
         shape_of[f"layers.{L}.attn.wo_b.scale"] = [1, 1]
@@ -653,6 +659,7 @@ def cmd_make_synthetic(dirpath):
         shape_of[f"layers.{L}.attn.wo_c.scale"] = [1, 1]
         shape_of[f"layers.{L}.attn.q_norm.weight"] = [4]
         shape_of[f"layers.{L}.attn.kv_norm.weight"] = [4]
+        shape_of[f"layers.{L}.attn.attn_sink"] = [64]
         shape_of[f"layers.{L}.ffn.gate.weight"] = [4, 8]
         shape_of[f"layers.{L}.ffn.gate.bias"] = [4]
         shape_of[f"layers.{L}.ffn.down"] = [8, 8]

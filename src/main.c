@@ -7,6 +7,7 @@
 #include "ds4f/ds4f.h"
 #include "ds4f/kernels.h"
 #include "ds4f/moe.h"
+#include "ds4f/attn.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -172,6 +173,8 @@ int main(int argc, char **argv) {
     /* real MoE mode: both layouts present and the pool is mxfp4 */
     Ds4fTrunkLayout tl;
     Ds4fPoolLayout pl;
+    Ds4fKvCache kvc;
+    int kv_ok = 0;
     int moe_mode = 0;
     float *state = NULL, *scratch = NULL;
     float **jscratch = NULL;
@@ -201,6 +204,16 @@ int main(int argc, char **argv) {
             }
         }
         plan.state_b += (double)scratch_n * 4.0 * (double)cfg.topk;
+        /* KV cache (MLA, per-layer): kvlat x 4B x n_layers x gen */
+        int kvlat = tl.kvlat;
+        if (kvlat < 1) kvlat = 1;
+        if (ds4f_kv_init(&kvc, cfg.n_layers, kvlat, gen) != 0) {
+            fprintf(stderr, "moe: kv cache init failed\n");
+            return 2;
+        }
+        kv_ok = 1;
+        plan.state_b += (double)kvlat * 4.0 * (double)cfg.n_layers *
+                        (double)gen;
         plan.need_b = plan.trunk_pin_b + plan.trunk_ring_b + plan.cache_b +
                       plan.shared_b + plan.state_b + plan.index_b;
         int nreal = 0;
@@ -236,6 +249,10 @@ int main(int argc, char **argv) {
             if (!tr) { fprintf(stderr, "trunk bind failed at layer %d\n", L); return 2; }
 
             int use_real = moe_mode && tl.gate[L] >= 0;
+            /* MLA attention first: it reads/writes state, and the
+             * router below sees the post-attention state (real order) */
+            if (use_real && kv_ok)
+                ds4f_attn_step(&cfg, &tl, L, tr, state, &kvc, t);
             if (use_real) {
                 const Ds4fTrunkTensor *gt = &tl.t[tl.gate[L]];
                 float scores[256];
@@ -353,6 +370,7 @@ int main(int argc, char **argv) {
         for (int k = 0; k < cfg.topk - 1; k++) free(jscratch[k]);
         free(jscratch);
     }
+    if (kv_ok) ds4f_kv_free(&kvc);
     ds4f_cache_free(&cache);
     ds4f_trunk_close(&trunk);
     free(pool.ref);

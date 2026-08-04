@@ -160,7 +160,16 @@ int ds4f_trunk_layout_load(Ds4fTrunkLayout *tl, const char *path) {
     for (int L = 0; L < DS4F_MAX_LAYERS; L++) {
         tl->gate[L] = tl->down[L] = tl->up[L] = -1;
         tl->gate_bias[L] = -1;
+        tl->attn_qn[L] = tl->attn_kvn[L] = -1;
+        tl->attn_wqa[L] = tl->attn_wqa_s[L] = -1;
+        tl->attn_wqb[L] = tl->attn_wqb_s[L] = -1;
+        tl->attn_wkv[L] = tl->attn_wkv_s[L] = -1;
+        tl->attn_woa[L] = tl->attn_woa_s[L] = -1;
+        tl->attn_wob[L] = tl->attn_wob_s[L] = -1;
+        tl->attn_woc[L] = tl->attn_woc_s[L] = -1;
+        tl->attn_sink[L] = -1;
     }
+    tl->kvlat = 0;
 
     int total = 0;
     for (int i = 0; i < ls->nchild; i++) {
@@ -255,6 +264,37 @@ int ds4f_trunk_layout_load(Ds4fTrunkLayout *tl, const char *path) {
                 } else if (name_ends(tt->name, ".ffn.up.weight") &&
                            tt->dtype == 0) {
                     if (tl->up[L] < 0) tl->up[L] = k - 1;
+                } else if (name_ends(tt->name, ".attn.q_norm.weight")) {
+                    if (tl->attn_qn[L] < 0) tl->attn_qn[L] = k - 1;
+                } else if (name_ends(tt->name, ".attn.kv_norm.weight")) {
+                    if (tl->attn_kvn[L] < 0) tl->attn_kvn[L] = k - 1;
+                } else if (name_ends(tt->name, ".attn.wq_a.weight")) {
+                    if (tl->attn_wqa[L] < 0) tl->attn_wqa[L] = k - 1;
+                } else if (name_ends(tt->name, ".attn.wq_a.scale")) {
+                    if (tl->attn_wqa_s[L] < 0) tl->attn_wqa_s[L] = k - 1;
+                } else if (name_ends(tt->name, ".attn.wq_b.weight")) {
+                    if (tl->attn_wqb[L] < 0) tl->attn_wqb[L] = k - 1;
+                } else if (name_ends(tt->name, ".attn.wq_b.scale")) {
+                    if (tl->attn_wqb_s[L] < 0) tl->attn_wqb_s[L] = k - 1;
+                } else if (name_ends(tt->name, ".attn.wkv.weight")) {
+                    if (tl->attn_wkv[L] < 0) tl->attn_wkv[L] = k - 1;
+                } else if (name_ends(tt->name, ".attn.wkv.scale")) {
+                    if (tl->attn_wkv_s[L] < 0) tl->attn_wkv_s[L] = k - 1;
+                } else if (name_ends(tt->name, ".attn.wo_a.weight")) {
+                    if (tl->attn_woa[L] < 0) tl->attn_woa[L] = k - 1;
+                } else if (name_ends(tt->name, ".attn.wo_a.scale")) {
+                    if (tl->attn_woa_s[L] < 0) tl->attn_woa_s[L] = k - 1;
+                } else if (name_ends(tt->name, ".attn.wo_b.weight")) {
+                    if (tl->attn_wob[L] < 0) tl->attn_wob[L] = k - 1;
+                } else if (name_ends(tt->name, ".attn.wo_b.scale")) {
+                    if (tl->attn_wob_s[L] < 0) tl->attn_wob_s[L] = k - 1;
+                } else if (name_ends(tt->name, ".attn.wo_c.weight")) {
+                    if (tl->attn_woc[L] < 0) tl->attn_woc[L] = k - 1;
+                } else if (name_ends(tt->name, ".attn.wo_c.scale")) {
+                    if (tl->attn_woc_s[L] < 0) tl->attn_woc_s[L] = k - 1;
+                } else if (name_ends(tt->name, ".attn.attn_sink") &&
+                           tt->dtype == 0) {
+                    if (tl->attn_sink[L] < 0) tl->attn_sink[L] = k - 1;
                 }
             }
         }
@@ -321,6 +361,11 @@ static void *exp_run(void *arg) {
     }
     long ncopy = j->Lat < clen ? j->Lat : clen;
     memcpy(j->out, cur, (size_t)ncopy * sizeof(float));
+    /* the caller combines over all Lat elements: the tail must be
+     * zero, not malloc garbage (nondeterministic dumps otherwise) */
+    if (ncopy < j->Lat)
+        memset(j->out + ncopy, 0,
+               (size_t)(j->Lat - ncopy) * sizeof(float));
     free(cur);
     free(tmp);
     return NULL;

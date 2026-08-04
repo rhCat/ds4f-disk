@@ -59,6 +59,17 @@ typedef struct Ds4fTrunkLayout {
     int   gate_bias[DS4F_MAX_LAYERS];
     int   down[DS4F_MAX_LAYERS];
     int   up[DS4F_MAX_LAYERS];
+    /* MLA attention roles (issue #6); _s = the E8M0 scale sibling */
+    int   attn_qn[DS4F_MAX_LAYERS];
+    int   attn_kvn[DS4F_MAX_LAYERS];
+    int   attn_wqa[DS4F_MAX_LAYERS],  attn_wqa_s[DS4F_MAX_LAYERS];
+    int   attn_wqb[DS4F_MAX_LAYERS],  attn_wqb_s[DS4F_MAX_LAYERS];
+    int   attn_wkv[DS4F_MAX_LAYERS],  attn_wkv_s[DS4F_MAX_LAYERS];
+    int   attn_woa[DS4F_MAX_LAYERS],  attn_woa_s[DS4F_MAX_LAYERS];
+    int   attn_wob[DS4F_MAX_LAYERS],  attn_wob_s[DS4F_MAX_LAYERS];
+    int   attn_woc[DS4F_MAX_LAYERS],  attn_woc_s[DS4F_MAX_LAYERS];
+    int   attn_sink[DS4F_MAX_LAYERS];
+    int   kvlat;                /* wkv output dim (0 = no attention) */
 } Ds4fTrunkLayout;
 
 /* Load trunk.json (as written by tools/convert-ds4f.py convert). */

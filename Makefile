@@ -4,9 +4,9 @@ INC      = -Iinclude -Isrc
 SRC      = src/cfg.c src/st.c src/trunk.c src/cache.c src/router.c src/mem.c src/kernels.c src/moe.c
 
 HDR = include/ds4f/ds4f.h include/ds4f/kernels.h include/ds4f/moe.h \
-      include/ds4f/simd.h src/json.h
+      include/ds4f/simd.h include/ds4f/attn.h src/json.h
 SRC = src/cfg.c src/st.c src/trunk.c src/cache.c src/router.c src/mem.c \
-      src/kernels.c src/moe.c src/simd.c
+      src/kernels.c src/moe.c src/simd.c src/attn.c
 
 all: ds4f pack-trunk make-fixture bench-kernels
 
