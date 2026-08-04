@@ -181,6 +181,7 @@ int main(int argc, char **argv) {
     fprintf(stderr,
             "\n--- run report ---\n"
             "config: %d layers x %d experts, topk %d, expert %lld bytes\n"
+            "pool:   %s\n"
             "trunk:  pin %d/%d layers, ring %d x %lld bytes\n"
             "cache:  %d slots (%d MB), %d fetch threads\n"
             "%d tokens in %.1f s, %.2f s/token\n"
@@ -188,6 +189,7 @@ int main(int argc, char **argv) {
             "cache: %lld requests, %lld hits (%.1f%%), %lld dropped\n"
             "PEAK RSS: %.2f GB (measured, not the forecast)\n",
             cfg.n_layers, cfg.n_experts, cfg.topk, (long long)cfg.expert_nbytes,
+            pool_src,
             trunk.npin, trunk.n_layers, trunk.nring, (long long)trunk.slot,
             cache.nslot, (int)(cache_bytes / (1 << 20)),
             threads,
