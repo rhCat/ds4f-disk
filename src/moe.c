@@ -291,6 +291,12 @@ int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
     if (M > D) D = M;
     if (D < 1) return -1;
 
+    /* Entry RMS: the reference rescales the residual to this at the end
+     * of the layer (see below). */
+    double ss_in = 0.0;
+    for (int i = 0; i < H; i++) ss_in += (double)state[i] * state[i];
+    float rms_in = sqrtf((float)(ss_in / (double)H));
+
     float *latent = (float *)malloc((size_t)D * sizeof(float));
     float *cur    = (float *)malloc((size_t)D * sizeof(float));
     float *out    = (float *)malloc((size_t)D * sizeof(float));
@@ -360,6 +366,23 @@ int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
     }
     if (!up_ok)
         for (int i = 0; i < H && i < Lat; i++) state[i] += acc[i];
+
+    /* Skeleton normalization. The real model bounds activations through
+     * its hyperconnection machinery (hc_* tensors), which this reference
+     * does not implement; without any normalization the residual chain
+     * compounds and state goes non-finite within a few tokens (observed
+     * on the real checkpoint). Rescale the post-residual state to the
+     * RMS it had on entry. Deterministic (IEEE sqrtf/div), and both
+     * backends must match it exactly. */
+    double ss = 0.0;
+    for (int i = 0; i < H; i++) {
+        float v = state[i];
+        ss += (double)v * v;
+    }
+    float rms_out = sqrtf((float)(ss / (double)H)) + 1e-30f;
+    float gain = rms_in / rms_out;
+    if (gain > 0.0f && gain < 1e30f)
+        for (int i = 0; i < H; i++) state[i] *= gain;
 
     free(latent); free(cur); free(out); free(acc);
     return 0;
