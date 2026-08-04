@@ -29,6 +29,9 @@ typedef struct Ds4fEmbed {
     long     buf_n;
     long     dims[4];
     int      rank, dtype;
+    long     s_off, s_nbytes;
+    long     sdims[4];
+    int      srank;
 } Ds4fEmbed;
 
 int ds4f_head_load(Ds4fHead *h, const char *json_path);

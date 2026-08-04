@@ -63,4 +63,10 @@ void ds4f_f8_matvec(const uint8_t *W, const uint8_t *scales,
 void ds4f_kernels_set_simd(int on);
 int  ds4f_kernels_simd(void);
 
+/* F8 decode of one row of a [V x H] F8_E4M3 tensor with E8M0 block
+ * scales [SR x SC] (element (r,c) uses scale[r*SR/V][c*SC/H]); NULL
+ * scales means 1.0 everywhere. Used by the embedding gather. */
+void ds4f_f8_decode_row(const uint8_t *W, const uint8_t *scales,
+                        int V, int H, int SR, int SC, int row, float *out);
+
 #endif /* DS4F_KERNELS_H */

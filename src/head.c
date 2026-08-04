@@ -57,7 +57,15 @@ int ds4f_head_load(Ds4fHead *h, const char *json_path) {
     const JEntry *bin = json_get(doc->root, doc->nroot, "bin");
     const JEntry *w = json_get(doc->root, doc->nroot, "weight");
     const JEntry *s = json_get(doc->root, doc->nroot, "scale");
-    if (!bin || !w || !s || bin->type != 1) { json_free(doc); free(js); return -1; }
+    if (!bin || !w || bin->type != 1) { json_free(doc); free(js); return -1; }
+    /* scale is OPTIONAL (a checkpoint may keep the head unquantized);
+     * null/absent means no scales -> 1.0 everywhere */
+    if (s && s->type == 2 && s->child) {
+        h->s_off = jnum(json_get(s->child, s->nchild, "off"), 0);
+        h->s_nbytes = jnum(json_get(s->child, s->nchild, "nbytes"), 0);
+        jshape(json_get(s->child, s->nchild, "shape"),
+               h->sdims, &h->srank);
+    }
     size_t bl = (size_t)(bin->str_end - bin->str);
     char bin_path[4096];
     if (bl >= sizeof bin_path) { json_free(doc); free(js); return -1; }
@@ -79,8 +87,6 @@ int ds4f_head_load(Ds4fHead *h, const char *json_path) {
     }
     h->w_off = jnum(json_get(w->child, w->nchild, "off"), 0);
     h->w_nbytes = jnum(json_get(w->child, w->nchild, "nbytes"), 0);
-    h->s_off = jnum(json_get(s->child, s->nchild, "off"), 0);
-    h->s_nbytes = jnum(json_get(s->child, s->nchild, "nbytes"), 0);
     const JEntry *wdt = json_get(w->child, w->nchild, "dtype");
     if (wdt && wdt->type == 1) {
         if (wdt->str_end - wdt->str == 7 &&
@@ -101,8 +107,8 @@ int ds4f_head_load(Ds4fHead *h, const char *json_path) {
         ds4f_head_free(h);
         return -1;
     }
-    if (h->w_dtype != 2) {
-        fprintf(stderr, "head: dtype %d unsupported (F8_E4M3 only)\n",
+    if (h->w_dtype != 0 && h->w_dtype != 2 && h->w_dtype != 4) {
+        fprintf(stderr, "head: dtype %d unsupported (F32/F8_E4M3/BF16)\n",
                 h->w_dtype);
         ds4f_head_free(h);
         return -1;
@@ -131,6 +137,13 @@ int ds4f_embed_load(Ds4fEmbed *e, const char *json_path) {
     const JEntry *dt = json_get(doc->root, doc->nroot, "dtype");
     if (!bin || bin->type != 1) { json_free(doc); free(js); return -1; }
     jshape(json_get(doc->root, doc->nroot, "shape"), e->dims, &e->rank);
+    const JEntry *sc = json_get(doc->root, doc->nroot, "scale");
+    if (sc && sc->type == 2 && sc->child) {
+        e->s_off = jnum(json_get(sc->child, sc->nchild, "off"), 0);
+        e->s_nbytes = jnum(json_get(sc->child, sc->nchild, "nbytes"), 0);
+        jshape(json_get(sc->child, sc->nchild, "shape"),
+               e->sdims, &e->srank);
+    }
     e->dtype = 3;
     if (dt && dt->type == 1) {
         if (dt->str_end - dt->str == 3 && !memcmp(dt->str, "F32", 3))
@@ -147,8 +160,8 @@ int ds4f_embed_load(Ds4fEmbed *e, const char *json_path) {
         bin_path[bl] = 0;
         json_free(doc);
         free(js);
-        if (e->dtype != 0 && e->dtype != 4) {
-            fprintf(stderr, "embed: dtype %d unsupported (F32/BF16 only)\n",
+        if (e->dtype != 0 && e->dtype != 2 && e->dtype != 4) {
+            fprintf(stderr, "embed: dtype %d unsupported (F32/F8_E4M3/BF16)\n",
                     e->dtype);
             return -1;
         }
@@ -174,15 +187,27 @@ void ds4f_embed_free(Ds4fEmbed *e) {
 int ds4f_head_logits(const Ds4fHead *h, const float *state, float *logits) {
     if (!h || !h->buf || h->rank != 2) return -1;
     long V = h->dims[0], H = h->dims[1];
+    const uint8_t *scales = NULL;
     int SR = 1, SC = 1;
-    if (h->srank == 2) {
-        SR = (int)h->sdims[0];
-        SC = (int)h->sdims[1];
-    } else if (h->srank == 1) {
-        SC = (int)h->sdims[0];
+    if (h->s_nbytes > 0) {
+        scales = h->buf + h->s_off;
+        if (h->srank == 2) {
+            SR = (int)h->sdims[0];
+            SC = (int)h->sdims[1];
+        } else if (h->srank == 1) {
+            SC = (int)h->sdims[0];
+        }
     }
-    ds4f_f8_matvec(h->buf + h->w_off, h->buf + h->s_off,
-                   (int)V, (int)H, SR, SC, state, logits);
+    if (h->w_dtype == 2) {
+        ds4f_f8_matvec(h->buf + h->w_off, scales,
+                       (int)V, (int)H, SR, SC, state, logits);
+    } else if (h->w_dtype == 0) {
+        ds4f_f32_matvec((const float *)(const void *)(h->buf + h->w_off),
+                        (int)V, (int)H, state, logits);
+    } else {
+        ds4f_bf16_matvec((const uint16_t *)(const void *)(h->buf + h->w_off),
+                         (int)V, (int)H, state, NULL, logits);
+    }
     return 0;
 }
 
@@ -190,9 +215,23 @@ int ds4f_embed_gather(const Ds4fEmbed *e, int tok, float *out) {
     if (!e || !e->buf || e->rank != 2) return -1;
     long V = e->dims[0], H = e->dims[1];
     if (tok < 0 || tok >= V) return -1;
-    const uint8_t *row = e->buf + (size_t)tok * H * (e->dtype == 4 ? 2 : 4);
+    size_t esz = e->dtype == 0 ? 4 : (e->dtype == 4 ? 2 : 1);
+    const uint8_t *row = e->buf + (size_t)tok * H * esz;
     if (e->dtype == 0) {
         memcpy(out, row, (size_t)H * sizeof(float));
+    } else if (e->dtype == 2) {
+        const uint8_t *scales = NULL;
+        int SR = 1, SC = 1;
+        if (e->s_nbytes > 0) {
+            scales = e->buf + e->s_off;
+            if (e->srank == 2) {
+                SR = (int)e->sdims[0];
+                SC = (int)e->sdims[1];
+            } else if (e->srank == 1) {
+                SC = (int)e->sdims[0];
+            }
+        }
+        ds4f_f8_decode_row(row, scales, (int)V, (int)H, SR, SC, 0, out);
     } else {
         const uint16_t *r16 = (const uint16_t *)(const void *)row;
         for (int i = 0; i < (int)H; i++) {

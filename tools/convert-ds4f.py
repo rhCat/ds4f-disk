@@ -492,41 +492,75 @@ def cmd_convert(dirpath, outdir):
     # ---------------- embed.bin + head.bin (issue #6 step 3) ----------
     # The autoregressive loop needs the embedding table (gather) and the
     # output head (logits). Both live in the unclassified set; bytes are
-    # copied as-is with a tiny layout json per file.
+    # copied as-is with a tiny layout json per file. Discovery-first:
+    # candidate names (checkpoint naming varies), optional per-tensor
+    # scale sibling (block scales when present, null otherwise).
     def find_other(name):
         for t in other:
             if t[0] == name:
                 return t
         return None
 
-    emb = find_other("embed.weight")
+    def find_other_any(names):
+        for n in names:
+            t = find_other(n)
+            if t:
+                return t
+        return None
+
+    EMBED_NAMES = ["embed.weight", "model.embed_tokens.weight",
+                   "embed_tokens.weight", "wte.weight", "word_embeddings"]
+    HEAD_NAMES = ["head.weight", "lm_head.weight", "output.weight",
+                  "wpe.weight", "unembed.weight"]
+
+    emb = find_other_any(EMBED_NAMES)
     if emb:
         f, off, nb = src(emb[0])
         with open(os.path.join(outdir, "embed.bin"), "wb") as eb:
             copy_range(f, off, nb, eb, buf)
+        scale = None
+        for cand in (emb[0] + ".scale",
+                     emb[0].replace(".weight", ".scale")):
+            st = find_other(cand)
+            if st:
+                f2, o2, n2 = src(st[0])
+                with open(os.path.join(outdir, "embed.bin"), "ab") as eb:
+                    copy_range(f2, o2, n2, eb, buf)
+                scale = {"off": nb, "nbytes": n2, "dtype": st[4],
+                         "shape": list(st[5])}
+                break
         with open(os.path.join(outdir, "embed.json"), "w") as ej:
             json.dump({"bin": "embed.bin", "dtype": emb[4],
-                       "shape": list(emb[5]), "nbytes": nb}, ej, indent=1)
-        print(f"embed.bin {hsize(nb)} {emb[4]} {list(emb[5])}")
+                       "shape": list(emb[5]), "nbytes": nb,
+                       "scale": scale}, ej, indent=1)
+        print(f"embed.bin {hsize(nb)} {emb[4]} {list(emb[5])} "
+              f"(scale: {'yes' if scale else 'no'})")
 
-    hw = find_other("head.weight")
-    hs = find_other("head.scale")
-    if hw and hs:
+    hw = find_other_any(HEAD_NAMES)
+    hs = find_other("head.scale") or find_other("lm_head.scale") or \
+         find_other("output.scale")
+    if hw:
         f_w, off_w, nb_w = src(hw[0])
-        f_s, off_s, nb_s = src(hs[0])
         with open(os.path.join(outdir, "head.bin"), "wb") as hb:
             copy_range(f_w, off_w, nb_w, hb, buf)
-            copy_range(f_s, off_s, nb_s, hb, buf)
+        scale = None
+        scale_n = 0
+        if hs:
+            f_s, off_s, nb_s = src(hs[0])
+            with open(os.path.join(outdir, "head.bin"), "ab") as hb:
+                copy_range(f_s, off_s, nb_s, hb, buf)
+            scale = {"off": nb_w, "nbytes": nb_s, "dtype": hs[4],
+                     "shape": list(hs[5])}
+            scale_n = nb_s
         with open(os.path.join(outdir, "head.json"), "w") as hj:
             json.dump({
                 "bin": "head.bin",
                 "weight": {"off": 0, "nbytes": nb_w, "dtype": hw[4],
                            "shape": list(hw[5])},
-                "scale": {"off": nb_w, "nbytes": nb_s, "dtype": hs[4],
-                          "shape": list(hs[5])},
+                "scale": scale,
             }, hj, indent=1)
-        print(f"head.bin {hsize(nb_w + nb_s)} "
-              f"{hw[4]} {list(hw[5])} + {hs[4]} {list(hs[5])}")
+        print(f"head.bin {hsize(nb_w + scale_n)} "
+              f"{hw[4]} {list(hw[5])} (scale: {'yes' if hs else 'no'})")
 
     for f in srcs.values():
         f.close()
