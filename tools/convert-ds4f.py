@@ -353,6 +353,10 @@ def put_u64(f, v):
 
 
 def cmd_convert(dirpath, outdir):
+    root = find_repo_root(dirpath)
+    if root != dirpath:
+        print(f"found repo-like content under: {root}")
+        dirpath = root
     shards, _, config = discover(dirpath)
     mapped, assumptions = map_config(config)
     missing = [k for k in REQUIRED if not mapped.get(k)]

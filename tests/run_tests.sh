@@ -48,12 +48,15 @@ python3 tools/trace_replay.py "$FIX/trace.csv" --caps 1,2,4 >/dev/null 2>&1 \
     && { echo "PASS e2e_replay"; pass=$((pass + 1)); } \
     || { echo "FAIL e2e_replay"; fail=$((fail + 1)); }
 
-# converter e2e: synthetic HF repo -> inspect -> convert -> engine --pool
+# converter e2e: synthetic HF repo (in a subdir, like the acer layout)
+# -> inspect -> convert -> engine --pool
 SYN="$(mktemp -d)"
 trap 'rm -rf "$FIX" "$SYN"' EXIT
 python3 tools/convert-ds4f.py make-synthetic "$SYN/src" >/dev/null 2>&1
-python3 tools/convert-ds4f.py inspect "$SYN/src" >/dev/null 2>&1
-if python3 tools/convert-ds4f.py convert "$SYN/src" --out "$SYN/out" >/dev/null 2>&1 \
+mkdir -p "$SYN/wrap"
+mv "$SYN/src" "$SYN/wrap/model"
+python3 tools/convert-ds4f.py inspect "$SYN/wrap" >/dev/null 2>&1
+if python3 tools/convert-ds4f.py convert "$SYN/wrap" --out "$SYN/out" >/dev/null 2>&1 \
    && ./ds4f "$SYN/out" --trunk "$SYN/out/trunk.bin" \
         --offsets "$SYN/out/trunk.offsets" --pool "$SYN/out/pool.bin" \
         --gen 3 --cache-gb 1 >/dev/null 2>&1; then
