@@ -168,7 +168,8 @@ int ds4f_trunk_layout_load(Ds4fTrunkLayout *tl, const char *path) {
         tl->attn_wob[L] = tl->attn_wob_s[L] = -1;
         tl->attn_woc[L] = tl->attn_woc_s[L] = -1;
         tl->attn_sink[L] = -1;
-        tl->hc_attn[L] = tl->hc_ffn[L] = -1;
+        tl->hc_attn_fn[L] = tl->hc_attn_base[L] = tl->hc_attn_scale[L] = -1;
+        tl->hc_ffn_fn[L] = tl->hc_ffn_base[L] = tl->hc_ffn_scale[L] = -1;
     }
     tl->kvlat = 0;
 
@@ -296,10 +297,20 @@ int ds4f_trunk_layout_load(Ds4fTrunkLayout *tl, const char *path) {
                 } else if (name_ends(tt->name, ".attn.attn_sink") &&
                            tt->dtype == 0) {
                     if (tl->attn_sink[L] < 0) tl->attn_sink[L] = k - 1;
+                } else if (name_ends(tt->name, ".hc_attn_fn")) {
+                    if (tl->hc_attn_fn[L] < 0) tl->hc_attn_fn[L] = k - 1;
                 } else if (name_ends(tt->name, ".hc_attn_base")) {
-                    if (tl->hc_attn[L] < 0) tl->hc_attn[L] = k - 1;
+                    if (tl->hc_attn_base[L] < 0) tl->hc_attn_base[L] = k - 1;
+                } else if (name_ends(tt->name, ".hc_attn_scale")) {
+                    if (tl->hc_attn_scale[L] < 0)
+                        tl->hc_attn_scale[L] = k - 1;
+                } else if (name_ends(tt->name, ".hc_ffn_fn")) {
+                    if (tl->hc_ffn_fn[L] < 0) tl->hc_ffn_fn[L] = k - 1;
                 } else if (name_ends(tt->name, ".hc_ffn_base")) {
-                    if (tl->hc_ffn[L] < 0) tl->hc_ffn[L] = k - 1;
+                    if (tl->hc_ffn_base[L] < 0) tl->hc_ffn_base[L] = k - 1;
+                } else if (name_ends(tt->name, ".hc_ffn_scale")) {
+                    if (tl->hc_ffn_scale[L] < 0)
+                        tl->hc_ffn_scale[L] = k - 1;
                 }
             }
         }
@@ -408,47 +419,62 @@ static float bf16_f(uint16_t h) {
     return f;
 }
 
-/* Hyper-connection scale (issue #6): elementwise [H] or scalar,
- * F32/BF16/I8/F8. No-op when idx < 0. */
-void ds4f_apply_hc(const Ds4fTrunkLayout *tl, int idx, const uint8_t *tr,
-                   int H, float *state) {
-    if (idx < 0) return;
-    const Ds4fTrunkTensor *t = &tl->t[idx];
+/* read one element of a small F32/BF16 tensor by index */
+static float hc_elem(const Ds4fTrunkTensor *t, const uint8_t *tr, long i) {
     const uint8_t *p = tr + t->off;
-    long n = t->dims[0] > 0 ? t->dims[0] : 1;
-    if (t->dtype == 0) {                        /* F32 */
-        const float *f = (const float *)(const void *)p;
-        if (n == 1) {
-            for (int i = 0; i < H; i++) state[i] *= f[0];
-        } else {
-            for (int i = 0; i < H && i < n; i++) state[i] *= f[i];
-        }
-    } else if (t->dtype == 4) {                 /* BF16 */
+    if (t->dtype == 4) {
         const uint16_t *b = (const uint16_t *)(const void *)p;
-        if (n == 1) {
-            float s = bf16_f(b[0]);
-            for (int i = 0; i < H; i++) state[i] *= s;
-        } else {
-            for (int i = 0; i < H && i < n; i++)
-                state[i] *= bf16_f(b[i]);
-        }
-    } else if (t->dtype == 1) {                 /* I8 */
-        const int8_t *s8 = (const int8_t *)(const void *)p;
-        if (n == 1) {
-            for (int i = 0; i < H; i++) state[i] *= (float)s8[0];
-        } else {
-            for (int i = 0; i < H && i < n; i++)
-                state[i] *= (float)s8[i];
-        }
-    } else if (t->dtype == 2) {                 /* F8_E4M3 */
-        if (n == 1) {
-            float s = ds4f_f8_value(p[0]);
-            for (int i = 0; i < H; i++) state[i] *= s;
-        } else {
-            for (int i = 0; i < H && i < n; i++)
-                state[i] *= ds4f_f8_value(p[i]);
-        }
+        return bf16_f(b[i]);
     }
+    const float *f = (const float *)(const void *)p;
+    return f[i];
+}
+
+/* mHC (n_hc = 1) input/output scalars (DeepSeek-V4 paper eq. 1/3/5/7):
+ *   xhat = RMSNorm(state)
+ *   A = sigmoid( alpha_pre * dot(xhat, W_pre) + S_pre )
+ *   C = 2 * sigmoid( alpha_post * dot(xhat, W_post) + S_post )
+ * The residual transform B is doubly stochastic at n_hc = 1, i.e. 1,
+ * so the update is x_out = x + C * F(A * x). fn is [H x 3] (cols pre,
+ * post, res), base [3], scale [3] (alpha_pre, alpha_post, alpha_res).
+ * F32/BF16 weights. Returns 1 when present, 0 when absent (A = C = 1),
+ * -1 on shape mismatch (the caller decides: refuse or fall back). */
+int ds4f_hc_ac(const Ds4fTrunkLayout *tl, int fn_i, int base_i, int sc_i,
+               const uint8_t *tr, int H, const float *state,
+               float *A, float *C) {
+    *A = 1.0f;
+    *C = 1.0f;
+    if (fn_i < 0 || base_i < 0 || sc_i < 0) return 0;
+    const Ds4fTrunkTensor *fn = &tl->t[fn_i];
+    const Ds4fTrunkTensor *bs = &tl->t[base_i];
+    const Ds4fTrunkTensor *al = &tl->t[sc_i];
+    if (fn->rank != 2 || fn->dims[0] != H || fn->dims[1] != 3) {
+        fprintf(stderr,
+                "hc: fn shape [%ld x %ld] unsupported (want [%d x 3])\n",
+                (long)fn->dims[0], (long)fn->dims[1], H);
+        return -1;
+    }
+    if ((fn->dtype != 0 && fn->dtype != 4) ||
+        (bs->dtype != 0 && bs->dtype != 4) ||
+        (al->dtype != 0 && al->dtype != 4)) {
+        fprintf(stderr, "hc: dtype unsupported (F32/BF16 only)\n");
+        return -1;
+    }
+    /* xhat = RMSNorm(state) */
+    double ss = 0.0;
+    for (int i = 0; i < H; i++) ss += (double)state[i] * state[i];
+    float r = sqrtf((float)(ss / (double)H) + 1e-6f);
+    float dot_pre = 0.0f, dot_post = 0.0f;
+    for (int i = 0; i < H; i++) {
+        float xh = state[i] / r;
+        dot_pre += xh * hc_elem(fn, tr, (long)i * 3 + 0);
+        dot_post += xh * hc_elem(fn, tr, (long)i * 3 + 1);
+    }
+    float a_pre = hc_elem(al, tr, 0) * dot_pre + hc_elem(bs, tr, 0);
+    float a_post = hc_elem(al, tr, 1) * dot_post + hc_elem(bs, tr, 1);
+    *A = 1.0f / (1.0f + expf(-a_pre));
+    *C = 2.0f / (1.0f + expf(-a_post));
+    return 1;
 }
 
 int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
@@ -462,11 +488,27 @@ int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
     if (M > D) D = M;
     if (D < 1) return -1;
 
+    /* mHC (issue #6 step 6): F_ffn sees A*state; the output replaces
+     * the residual: state_out = state + C * F(A*state). orig holds the
+     * pre-ffn state; the RMS-rescale below is the no-hc fallback. */
+    float hcA = 1.0f, hcC = 1.0f;
+    int hc_ok = tl ? ds4f_hc_ac(tl, tl->hc_ffn_fn[L], tl->hc_ffn_base[L],
+                                tl->hc_ffn_scale[L], tr, H, state,
+                                &hcA, &hcC) : 0;
+    if (hc_ok < 0) return -1;
+    float *orig = hc_ok ? (float *)malloc((size_t)H * sizeof(float)) : NULL;
+    if (hc_ok && !orig) return -1;
+    if (hc_ok) {
+        memcpy(orig, state, (size_t)H * sizeof(float));
+        for (int i = 0; i < H; i++) state[i] *= hcA;
+    }
+
     /* Entry RMS: the reference rescales the residual to this at the end
-     * of the layer (see below). */
+     * of the layer (see below). Only needed for the no-hc fallback. */
     double ss_in = 0.0;
-    for (int i = 0; i < H; i++) ss_in += (double)state[i] * state[i];
-    float rms_in = sqrtf((float)(ss_in / (double)H));
+    if (!hc_ok)
+        for (int i = 0; i < H; i++) ss_in += (double)state[i] * state[i];
+    float rms_in = hc_ok ? 0.0f : sqrtf((float)(ss_in / (double)H));
 
     float *latent = (float *)calloc((size_t)D, sizeof(float));
     float *cur    = (float *)calloc((size_t)D, sizeof(float));
@@ -575,14 +617,14 @@ int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
     if (!up_ok)
         for (int i = 0; i < H && i < Lat; i++) state[i] += acc[i];
 
-    /* Activation bounding. The real model does this through its
-     * hyperconnection machinery: the hc_ffn_base tensor scales the
-     * post-residual state elementwise (learned per-element norm). When
-     * the checkpoint carries hc_* tensors, use them; otherwise fall
-     * back to the RMS-rescale (deterministic IEEE sqrtf/div, both
-     * backends must match it exactly). */
-    if (tl && tl->hc_ffn[L] >= 0) {
-        ds4f_apply_hc(tl, tl->hc_ffn[L], tr, H, state);
+    /* Activation bounding. With mHC tensors: state_out = orig + C*F,
+     * where F = A*orig + up_out - A*orig (state currently holds
+     * A*orig + up_out). Without them, fall back to the RMS-rescale
+     * (deterministic IEEE sqrtf/div, both backends must match it). */
+    if (hc_ok) {
+        for (int i = 0; i < H; i++)
+            state[i] = orig[i] + hcC * (state[i] - hcA * orig[i]);
+        free(orig);
     } else {
         double ss = 0.0;
         for (int i = 0; i < H; i++) {

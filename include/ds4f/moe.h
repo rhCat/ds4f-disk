@@ -69,7 +69,15 @@ typedef struct Ds4fTrunkLayout {
     int   attn_wob[DS4F_MAX_LAYERS],  attn_wob_s[DS4F_MAX_LAYERS];
     int   attn_woc[DS4F_MAX_LAYERS],  attn_woc_s[DS4F_MAX_LAYERS];
     int   attn_sink[DS4F_MAX_LAYERS];
-    int   hc_attn[DS4F_MAX_LAYERS], hc_ffn[DS4F_MAX_LAYERS];
+    /* mHC (issue #6 step 6): per layer, three tensors per connection:
+     * fn = the W projections (cols: pre, post, res), base = the S
+     * biases (same order), scale = the alpha gating scalars
+     * (alpha_pre, alpha_post, alpha_res -- NVIDIA bridge mapping).
+     * n_hc = 1: the residual transform B is constrained to 1. */
+    int   hc_attn_fn[DS4F_MAX_LAYERS], hc_attn_base[DS4F_MAX_LAYERS],
+          hc_attn_scale[DS4F_MAX_LAYERS];
+    int   hc_ffn_fn[DS4F_MAX_LAYERS],  hc_ffn_base[DS4F_MAX_LAYERS],
+          hc_ffn_scale[DS4F_MAX_LAYERS];
     int   kvlat;                /* wkv output dim (0 = no attention) */
 } Ds4fTrunkLayout;
 
@@ -81,6 +89,18 @@ int ds4f_trunk_layout_load(Ds4fTrunkLayout *tl, const char *path);
  * idx < 0. Replaces the RMS-rescale stand-in when present. */
 void ds4f_apply_hc(const Ds4fTrunkLayout *tl, int idx, const uint8_t *tr,
                    int H, float *state);
+
+/* mHC (n_hc = 1) input/output scalars for one connection (issue #6):
+ *   xhat = RMSNorm(state)
+ *   A = sigmoid( alpha_pre * dot(xhat, W_pre) + S_pre )
+ *   C = 2 * sigmoid( alpha_post * dot(xhat, W_post) + S_post )
+ * fn = [H x 3] F32/BF16 (cols pre, post, res; res unused at n_hc=1),
+ * base = [3] (S_pre, S_post, S_res), scale = [3] (alpha_pre,
+ * alpha_post, alpha_res). Returns 1 when present (A/C set), else 0
+ * with A = C = 1. Refuses (returns -1) on unexpected shapes. */
+int ds4f_hc_ac(const Ds4fTrunkLayout *tl, int fn_i, int base_i, int sc_i,
+               const uint8_t *tr, int H, const float *state,
+               float *A, float *C);
 
 /* Top-k over scores: descending, tie-break by expert index (earlier
  * expert wins ties -- deterministic). */

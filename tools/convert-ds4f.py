@@ -613,8 +613,12 @@ def cmd_make_synthetic(dirpath):
     names = ["embed.weight", "head.weight", "head.scale"]
     for L in range(2):
         names += [
+            f"layers.{L}.hc_attn_fn",
             f"layers.{L}.hc_attn_base",
+            f"layers.{L}.hc_attn_scale",
+            f"layers.{L}.hc_ffn_fn",
             f"layers.{L}.hc_ffn_base",
+            f"layers.{L}.hc_ffn_scale",
             f"layers.{L}.attn.attn_sink",
             f"layers.{L}.attn.q_norm.weight",
             f"layers.{L}.attn.kv_norm.weight",
@@ -745,8 +749,12 @@ def cmd_make_synthetic(dirpath):
         shape_of[f"layers.{L}.attn.q_norm.weight"] = [4]
         shape_of[f"layers.{L}.attn.kv_norm.weight"] = [4]
         shape_of[f"layers.{L}.attn.attn_sink"] = [64]
-        shape_of[f"layers.{L}.hc_attn_base"] = [8]
-        shape_of[f"layers.{L}.hc_ffn_base"] = [8]
+        shape_of[f"layers.{L}.hc_attn_fn"] = [8, 3]
+        shape_of[f"layers.{L}.hc_attn_base"] = [3]
+        shape_of[f"layers.{L}.hc_attn_scale"] = [3]
+        shape_of[f"layers.{L}.hc_ffn_fn"] = [8, 3]
+        shape_of[f"layers.{L}.hc_ffn_base"] = [3]
+        shape_of[f"layers.{L}.hc_ffn_scale"] = [3]
         shape_of[f"layers.{L}.ffn.gate.weight"] = [4, 8]
         shape_of[f"layers.{L}.ffn.gate.bias"] = [4]
         shape_of[f"layers.{L}.ffn.down"] = [8, 8]

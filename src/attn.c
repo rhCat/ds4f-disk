@@ -94,7 +94,7 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
      * skipped chain) must be zero, not malloc garbage -- the softmax
      * and combine read them (determinism, issue #6 step 5). */
     float *buf = (float *)calloc((size_t)(qlat + qdim + kvhalf + kvlat +
-                                          2 * w + 3 * H + 1),
+                                          2 * w + 4 * H + 1),
                                  sizeof(float));
     if (!buf) return -1;
     float *ql = buf;
@@ -107,15 +107,27 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
     float *chb = cha + H;
     float *chc = chb + H;
 
+    /* mHC (issue #6 step 6): F_attn sees A*state; the residual keeps
+     * the ORIGINAL state + C*F. xin is H floats beyond the chain. */
+    float hcA = 1.0f, hcC = 1.0f;
+    int hc_ok = ds4f_hc_ac(tl, tl->hc_attn_fn[L], tl->hc_attn_base[L],
+                           tl->hc_attn_scale[L], tr, H, state, &hcA, &hcC);
+    if (hc_ok < 0) { free(buf); return -1; }
+    float *xin = chc + H;
+    if (hc_ok)
+        for (int i = 0; i < H; i++) xin[i] = state[i] * hcA;
+    else
+        xin = state;
+
     /* kv latent, normed, cached */
-    f8_matvec_t(tl, wkv, wkv_s, tr, kvlat, H, state, kvlat_buf);
+    f8_matvec_t(tl, wkv, wkv_s, tr, kvlat, H, xin, kvlat_buf);
     rmsnorm((const uint16_t *)(const void *)(tr + tl->t[kvn].off),
             kvlat, kvlat_buf);
     memcpy(kv->kv + ((size_t)L * kv->max_tokens + token) * kvlat,
            kvlat_buf, (size_t)kvlat * sizeof(float));
 
     /* q = wq_b . RMSNorm(wq_a . x, q_norm) */
-    f8_matvec_t(tl, wqa, wqa_s, tr, qlat, H, state, ql);
+    f8_matvec_t(tl, wqa, wqa_s, tr, qlat, H, xin, ql);
     rmsnorm((const uint16_t *)(const void *)(tr + tl->t[qn].off),
             qlat, ql);
     if (wqb >= 0)
@@ -161,11 +173,7 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
     f8_matvec_t(tl, woa, woa_s, tr, H, kvhalf, outv, cha);
     f8_matvec_t(tl, wob, wob_s, tr, H, H, cha, chb);
     f8_matvec_t(tl, woc, woc_s, tr, H, H, chb, chc);
-    for (int i = 0; i < H; i++) state[i] += chc[i];
-    /* hyper-connection scale (issue #6): the checkpoint's learned
-     * per-layer activation bound, applied after the attention residual
-     * (the hc_ffn_base applies in moe_step) */
-    ds4f_apply_hc(tl, tl->hc_attn[L], tr, H, state);
+    for (int i = 0; i < H; i++) state[i] += hcC * chc[i];
 
     free(buf);
     return 0;

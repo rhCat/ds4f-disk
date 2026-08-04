@@ -237,10 +237,10 @@ int main(int argc, char **argv) {
                         "others hash fallback\n", nreal, cfg.n_layers);
         int nha = 0, nhf = 0;
         for (int L = 0; L < cfg.n_layers; L++) {
-            if (tl.hc_attn[L] >= 0) nha++;
-            if (tl.hc_ffn[L] >= 0) nhf++;
+            if (tl.hc_attn_fn[L] >= 0) nha++;
+            if (tl.hc_ffn_fn[L] >= 0) nhf++;
         }
-        fprintf(stderr, "hc: hyper-connections on %d/%d attn, %d/%d ffn\n",
+        fprintf(stderr, "hc: mHC on %d/%d attn, %d/%d ffn\n",
                 nha, cfg.n_layers, nhf, cfg.n_layers);
     }
 
