@@ -66,6 +66,16 @@ else
     echo "FAIL e2e_convert"
     fail=$((fail + 1))
 fi
+# convert on an empty dir must refuse cleanly, not traceback
+mkdir -p "$SYN/empty"
+if python3 tools/convert-ds4f.py convert "$SYN/empty" --out "$SYN/o2" \
+        >/dev/null 2>&1; then
+    echo "FAIL e2e_convert_empty (should refuse)"
+    fail=$((fail + 1))
+else
+    echo "PASS e2e_convert_empty"
+    pass=$((pass + 1))
+fi
 
 echo
 echo "$pass passed, $fail failed"

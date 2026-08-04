@@ -354,6 +354,10 @@ def put_u64(f, v):
 
 def cmd_convert(dirpath, outdir):
     root = find_repo_root(dirpath)
+    if root is None:
+        print(f"REFUSE: no repo-like content under {dirpath} "
+              f"(no config.json, no .safetensors anywhere)")
+        sys.exit(1)
     if root != dirpath:
         print(f"found repo-like content under: {root}")
         dirpath = root
