@@ -425,6 +425,17 @@ def cmd_convert(dirpath, outdir):
     for src_key in ("num_attention_heads", "qk_rope_head_dim"):
         if config is not None and src_key in config:
             cfg_out[src_key] = int(config[src_key])
+    # the tyrope params (flattened from the nested rope_scaling dict)
+    rs = (config or {}).get("rope_scaling") or {}
+    for src_key, out_key in (("factor", "rope_factor"),
+                             ("beta_fast", "rope_beta_fast"),
+                             ("beta_slow", "rope_beta_slow"),
+                             ("original_max_position_embeddings",
+                              "rope_max_pos")):
+        if src_key in rs:
+            cfg_out[out_key] = rs[src_key]
+    if config is not None and "rope_theta" in config:
+        cfg_out.setdefault("rope_theta", config["rope_theta"])
     with open(os.path.join(outdir, "config.json"), "w") as f:
         json.dump(cfg_out, f, indent=2)
     print(f"config.json written (expert_nbytes={expert_bytes})")

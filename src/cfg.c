@@ -73,6 +73,17 @@ int ds4f_cfg_load(Ds4fCfg *cfg, const char *model_dir) {
         cfg->n_heads = (e && e->type == 0) ? (int)e->inum : 0;
         e = json_get(doc->root, doc->nroot, "qk_rope_head_dim");
         cfg->qk_rope = (e && e->type == 0) ? (int)e->inum : 0;
+        /* tyrope (yarn-style rope correction) params; 0 = plain rotary */
+        e = json_get(doc->root, doc->nroot, "rope_factor");
+        cfg->rope_factor = (e && e->type == 0) ? e->num : 0.0;
+        e = json_get(doc->root, doc->nroot, "rope_beta_fast");
+        cfg->rope_beta_fast = (e && e->type == 0) ? e->num : 0.0;
+        e = json_get(doc->root, doc->nroot, "rope_beta_slow");
+        cfg->rope_beta_slow = (e && e->type == 0) ? e->num : 0.0;
+        e = json_get(doc->root, doc->nroot, "rope_max_pos");
+        cfg->rope_max_pos = (e && e->type == 0) ? e->num : 0.0;
+        e = json_get(doc->root, doc->nroot, "rope_theta");
+        cfg->rope_theta = (e && e->type == 0) ? e->num : 0.0;
     }
 #undef GETI
     cfg->n_shards = 1;

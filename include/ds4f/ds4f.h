@@ -63,6 +63,11 @@ typedef struct Ds4fCfg {
     int      moe_inter;      /* expert MLP intermediate width */
     int      n_heads;        /* attention heads (0 = the kvhalf fallback) */
     int      qk_rope;        /* qk_rope_head_dim (0 = no rope term) */
+    double   rope_factor;    /* tyrope scaling factor (0 = plain rotary) */
+    double   rope_beta_fast; /* tyrope beta_fast (rotations) */
+    double   rope_beta_slow; /* tyrope beta_slow (rotations) */
+    double   rope_max_pos;   /* original_max_position_embeddings */
+    double   rope_theta;     /* tyrope base theta (0 = 10000) */
     int64_t  expert_nbytes;  /* fixed-rate payload, one routed expert */
     int      n_shards;
     uint64_t seed;

@@ -241,17 +241,45 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
         sinkv = (const float *)(const void *)(tr + tl->t[sink_i].off);
     }
     if (real_mla) {
-        /* rope frequencies (v2: the standard rotary, theta from the
-         * config's tyrope_theta; the tyrope temperature scaling is the
-         * documented next refinement) */
+        /* rope frequencies: the tyrope (yarn-style correction, from the
+         * DeepSeek V3.2/V4 rope_scaling: freq_inter = 1/(factor*theta^r),
+         * freq_extra = 1/theta^r, a linear ramp between the correction
+         * dims for beta_fast and beta_slow). Plain rotary when the
+         * params are absent. */
         int qr = cfg->qk_rope > 0 ? cfg->qk_rope : 0;
         static float rope_freq[32];
         static int rope_freq_ready = 0;
         if (qr > 0 && !rope_freq_ready) {
-            float theta = 10000.0f;
-            for (int i = 0; i < 32; i++)
-                rope_freq[i] = 1.0f /
-                    powf(theta, (float)(2 * i) / (float)qr);
+            double theta = cfg->rope_theta > 0 ? cfg->rope_theta : 10000.0;
+            double factor = cfg->rope_factor, bf = cfg->rope_beta_fast,
+                   bs = cfg->rope_beta_slow, mxp = cfg->rope_max_pos;
+            if (factor > 1.0 && mxp > 1.0 && bf > 0.0 && bs > 0.0) {
+                double lt = log(theta);
+                double corr_bf = (qr * log(mxp / (bf * 2.0 * M_PI))) /
+                                 (2.0 * lt);
+                double corr_bs = (qr * log(mxp / (bs * 2.0 * M_PI))) /
+                                 (2.0 * lt);
+                int low = (int)floor(corr_bf);
+                int high = (int)ceil(corr_bs);
+                if (low < 0) low = 0;
+                if (high >= qr / 2) high = qr / 2 - 1;
+                if (high < low) high = low;
+                for (int i = 0; i < qr / 2; i++) {
+                    double ex = 1.0 / pow(theta, (2.0 * i) / (double)qr);
+                    double it = 1.0 / (factor *
+                                       pow(theta, (2.0 * i) / (double)qr));
+                    double ramp = 0.0;
+                    if (high > low) {
+                        double r = ((double)i - low) / (double)(high - low);
+                        ramp = r < 0.0 ? 0.0 : (r > 1.0 ? 1.0 : r);
+                    }
+                    rope_freq[i] = (float)(it * (1.0 - ramp) + ex * ramp);
+                }
+            } else {
+                for (int i = 0; i < qr / 2; i++)
+                    rope_freq[i] = 1.0f / powf(
+                        (float)theta, (float)(2 * i) / (float)qr);
+            }
             rope_freq_ready = 1;
         }
         for (int h = 0; h < heads; h++) {
