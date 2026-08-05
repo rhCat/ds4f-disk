@@ -702,6 +702,8 @@ int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
                         float s = 0.0f;
                         for (int k = 0; k < nhc; k++)
                             s += B[j * nhc + k] * orig[k * H + i];
+                        if (getenv("DS4F_NO_B_MIX"))
+                            s = orig[j * H + i];
                         mix[j] = s + C[j] * out[i];
                     }
                     for (int j = 0; j < nhc; j++) state[j * H + i] = mix[j];

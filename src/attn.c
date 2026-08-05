@@ -465,13 +465,18 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
                         sqrtf((float)(f2 / (double)H)), rms_in);
             }
         }
-        /* new[j*H+i] = sum_k B[j][k]*state[k*H+i] + C[j]*chc[i] */
+        /* new[j*H+i] = sum_k B[j][k]*state[k*H+i] + C[j]*chc[i].
+         * DS4F_NO_B_MIX: identity-B (s + C*F -- the real model's
+         * residual-stream shape); the Sinkhorn B's contraction pins
+         * the state to a fixed point and the logits freeze. */
         float mix[8];
+        int no_b = getenv("DS4F_NO_B_MIX") ? 1 : 0;
         for (int i = 0; i < H; i++) {
             for (int j = 0; j < nhc; j++) {
-                float s = 0.0f;
-                for (int k = 0; k < nhc; k++)
-                    s += B[j * nhc + k] * state[k * H + i];
+                float s = no_b ? state[j * H + i] : 0.0f;
+                if (!no_b)
+                    for (int k = 0; k < nhc; k++)
+                        s += B[j * nhc + k] * state[k * H + i];
                 mix[j] = s + C[j] * chc[i];
             }
             for (int j = 0; j < nhc; j++) state[j * H + i] = mix[j];
