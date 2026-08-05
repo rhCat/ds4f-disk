@@ -395,8 +395,12 @@ int main(int argc, char **argv) {
     /* mHC layer-input buffer for the ffn router (H floats) */
     float *xin_buf = (float *)malloc((size_t)cfg.hidden * sizeof(float));
     if (!xin_buf) return 2;
+    /* dbg10 fix: the token-to-token delta needs per-layer prev states
+     * (the single prev_state compared adjacent layers -- the
+     * layer-transition magnitude, not the token's movement) */
     float *prev_state = (float *)malloc(
-        (size_t)cfg.hidden * mhc_streams * sizeof(float));
+        (size_t)cfg.hidden * mhc_streams * DS4F_MAX_LAYERS *
+        sizeof(float));
     if (!prev_state) return 2;
     float *prev_hin = (float *)malloc(
         (size_t)cfg.hidden * sizeof(float));
@@ -451,19 +455,25 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "[dbg6] t%d L%d rms=%.6g after attn\n",
                         t, L, sqrt(s2 / (double)n));
             }
-            if (getenv("DS4F_DEBUG10") && t > 0) {
+            if (getenv("DS4F_DEBUG10")) {
                 /* the token-information trace: the state's delta from
-                 * the previous token, per layer -- where the embed's
-                 * difference dies (the frozen direction) */
-                double d2 = 0.0;
-                long n = (long)cfg.hidden * mhc_streams;
-                for (long i = 0; i < n; i++) {
-                    float d = state[i] - prev_state[i];
-                    d2 += (double)d * d;
+                 * the PREVIOUS TOKEN at the SAME layer -- where the
+                 * embed's difference dies (the frozen direction) */
+                const float *pv = prev_state +
+                    (size_t)L * cfg.hidden * mhc_streams;
+                if (t > 0) {
+                    double d2 = 0.0;
+                    long n = (long)cfg.hidden * mhc_streams;
+                    for (long i = 0; i < n; i++) {
+                        float d = state[i] - pv[i];
+                        d2 += (double)d * d;
+                    }
+                    fprintf(stderr, "[dbg10] t%d L%d tok_delta=%.6g\n",
+                            t, L, sqrt(d2 / (double)n));
                 }
-                fprintf(stderr, "[dbg10] t%d L%d state_delta=%.6g\n",
-                        t, L, sqrt(d2 / (double)n));
-                memcpy(prev_state, state, (size_t)n * sizeof(float));
+                memcpy(prev_state + (size_t)L * cfg.hidden * mhc_streams,
+                       state, (size_t)cfg.hidden * mhc_streams *
+                       sizeof(float));
             }
             if (use_real) {
                 const Ds4fTrunkTensor *gt = &tl.t[tl.gate[L]];
