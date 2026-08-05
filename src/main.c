@@ -680,6 +680,13 @@ int main(int argc, char **argv) {
             int tokid;
             if (getenv("DS4F_GREEDY"))
                 tokid = ds4f_argmax(logits, (int)head.dims[0]);
+            else if (getenv("DS4F_TEMP")) {
+                float temp = (float)atof(getenv("DS4F_TEMP"));
+                if (temp > 0.0f && temp != 1.0f)
+                    for (int i = 0; i < (int)head.dims[0]; i++)
+                        logits[i] /= temp;
+                tokid = ds4f_sample(logits, (int)head.dims[0], &rng);
+            }
             else
                 tokid = ds4f_sample(logits, (int)head.dims[0], &rng);
             if (tok_path) {
