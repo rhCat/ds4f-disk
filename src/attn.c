@@ -357,16 +357,22 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
                     if (sc[t2] < smin) smin = sc[t2];
                     if (sc[t2] > smax) smax = sc[t2];
                 }
-                float vm = 0.0f, vv = 0.0f;
                 int np = token + 1;
-                for (int t2 = 0; t2 <= token; t2++) {
-                    float v0 = kv->kv[
-                        ((size_t)L * kv->max_tokens + t2) * kvlat +
-                        (kvlat - vh)];
-                    vm += v0; vv += v0 * v0;
+                float vstd = 0.0f, vmean = 0.0f;
+                for (int j = 0; j < vh; j++) {
+                    float m = 0.0f, s = 0.0f;
+                    for (int t2 = 0; t2 <= token; t2++) {
+                        float v = kv->kv[
+                            ((size_t)L * kv->max_tokens + t2) * kvlat +
+                            (kvlat - vh) + j];
+                        m += v; s += v * v;
+                    }
+                    m /= (float)np;
+                    s = sqrtf(s / (float)np - m * m);
+                    vstd += s; vmean += m;
                 }
-                vm /= (float)np;
-                vv = sqrtf(vv / (float)np - vm * vm);
+                vstd /= (float)vh;
+                vmean /= (float)vh;
                 float wmax = 0.0f;
                 for (int t2 = 0; t2 <= token; t2++) {
                     float wn = wg[t2] / sum;
@@ -374,8 +380,9 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
                 }
                 fprintf(stderr,
                         "c9: L%-2d t%-3d scores [%.3f, %.3f] "
-                        "spread %.3f vstd %.4f wmax %.3f\n",
-                        L, token, smin, smax, smax - smin, vv, wmax);
+                        "spread %.3f vstd %.4f vmean %.4f wmax %.3f\n",
+                        L, token, smin, smax, smax - smin, vstd, vmean,
+                        wmax);
             }
         }
     } else {
