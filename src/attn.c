@@ -173,6 +173,18 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
     }
     int w = token + 1;
     int w_sc = real_mla ? heads * w : w;
+    /* the value's offset within the latent: default the tail (the
+     * engine's [k_nope 448; v 64] assumption), overridable -- the
+     * vstd-0 evidence says the tail is the rope slot, not the value;
+     * DS4F_V_OFFSET sweeps the candidate value locations. */
+    int voff = kvlat - vh;
+    {
+        const char *vset = getenv("DS4F_V_OFFSET");
+        if (vset) {
+            int v = atoi(vset);
+            if (v >= 0 && v + vh <= kvlat) voff = v;
+        }
+    }
     int cha_n = (int)(ar > H ? ar : H);
     int chb_n = (int)(br > H ? br : H);
     /* calloc: any untouched tail (scores/wgt at short windows, or a
@@ -345,7 +357,7 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
             for (int t2 = 0; t2 <= token; t2++) {
                 const float *v2 = kv->kv +
                     ((size_t)L * kv->max_tokens + t2) * kvlat +
-                    (kvlat - vh);
+                    (voff);
                 float wgtn = wg[t2] / sum;
                 for (int j = 0; j < vh; j++) ov[j] += wgtn * v2[j];
             }
@@ -364,7 +376,7 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
                     for (int t2 = 0; t2 <= token; t2++) {
                         float v = kv->kv[
                             ((size_t)L * kv->max_tokens + t2) * kvlat +
-                            (kvlat - vh) + j];
+                            (voff) + j];
                         m += v; s += v * v;
                     }
                     m /= (float)np;
