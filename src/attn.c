@@ -71,11 +71,13 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
     int wob = tl->attn_wob[L], wob_s = tl->attn_wob_s[L];
     int woc = tl->attn_woc[L], woc_s = tl->attn_woc_s[L];
     int sink_i = tl->attn_sink[L];
-    /* incomplete graph -> skip the layer (graceful degradation) */
+    /* incomplete graph -> skip the layer (graceful degradation).
+     * NOTE: wo_c is OPTIONAL -- the real V4 chain is wo_a + wo_b
+     * only; requiring wo_c silently disabled attention on the real
+     * checkpoint (woc stayed -1 and the step returned 0). */
     if (qn < 0 || kvn < 0 || wqa < 0 || wqa_s < 0 ||
         wkv < 0 || wkv_s < 0 ||
-        woa < 0 || woa_s < 0 || wob < 0 || wob_s < 0 ||
-        woc < 0 || woc_s < 0)
+        woa < 0 || woa_s < 0 || wob < 0 || wob_s < 0)
         return 0;
     int H = cfg->hidden;
     int qlat = (int)tl->t[wqa].dims[0];

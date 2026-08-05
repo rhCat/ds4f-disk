@@ -346,6 +346,12 @@ int ds4f_trunk_layout_load(Ds4fTrunkLayout *tl, const char *path) {
             return -1;
         }
     }
+    /* the KV latent width: from the first layer's wkv tensor (derived
+     * AFTER the role matching above; main sizes the KV cache with it) */
+    tl->kvlat = 0;
+    for (int L = 0; L < tl->n_layers && tl->kvlat < 1; L++)
+        if (tl->attn_wkv[L] >= 0 && tl->t[tl->attn_wkv[L]].rank == 2)
+            tl->kvlat = (int)tl->t[tl->attn_wkv[L]].dims[0];
     return 0;
 }
 
