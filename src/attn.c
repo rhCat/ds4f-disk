@@ -326,7 +326,14 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
                     qr_buf[i + 1] = x * s + y * c;
                 }
             }
-            for (int t2 = 0; t2 <= token; t2++) {
+            /* CSA step 1: the sliding window (the checkpoint's
+             * sliding_window=128). DS4F_WINDOW overrides; 0 = full. */
+            int win = 0;
+            const char *we = getenv("DS4F_WINDOW");
+            if (we) win = atoi(we);
+            int t2a = 0;
+            if (win > 0 && token - win + 1 > t2a) t2a = token - win + 1;
+            for (int t2 = t2a; t2 <= token; t2++) {
                 const float *k2 = kv->kv +
                     ((size_t)L * kv->max_tokens + t2) * kvlat;
                 float acc = 0.0f;
@@ -522,7 +529,7 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
         /* the per-stream token-deltas: where the state's movement
          * lives (which of the 4 mHC streams carries the token) */
         static float prev_s13[DS4F_MAX_LAYERS][8][4096];
-        const float *pv = prev_s13[L];
+        const float *pv = &prev_s13[L][0][0];
         for (int j = 0; j < nhc; j++) {
             double d2 = 0.0;
             const float *cur = state + (size_t)j * H;
