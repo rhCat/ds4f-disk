@@ -181,16 +181,58 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
         sinkv = (const float *)(const void *)(tr + tl->t[sink_i].off);
     }
     if (real_mla) {
+        /* rope frequencies (v2: the standard rotary, theta from the
+         * config's tyrope_theta; the tyrope temperature scaling is the
+         * documented next refinement) */
+        int qr = cfg->qk_rope > 0 ? cfg->qk_rope : 0;
+        static float rope_freq[32];
+        static int rope_freq_ready = 0;
+        if (qr > 0 && !rope_freq_ready) {
+            float theta = 10000.0f;
+            for (int i = 0; i < 32; i++)
+                rope_freq[i] = 1.0f /
+                    powf(theta, (float)(2 * i) / (float)qr);
+            rope_freq_ready = 1;
+        }
         for (int h = 0; h < heads; h++) {
             const float *q_h = q + (size_t)h * qh;
             float *sc = scores + (size_t)h * w;
             float *wg = wgt + (size_t)h * w;
+            /* rotate the query's rope part once per head/token */
+            float qr_buf[64];
+            if (qr > 0 && qr <= 64) {
+                memcpy(qr_buf, q_h + qn_nope, (size_t)qr * sizeof(float));
+                for (int i = 0; i + 1 < qr; i += 2) {
+                    float a = (float)token * rope_freq[i / 2];
+                    float c = cosf(a), s = sinf(a);
+                    float x = qr_buf[i], y = qr_buf[i + 1];
+                    qr_buf[i] = x * c - y * s;
+                    qr_buf[i + 1] = x * s + y * c;
+                }
+            }
             for (int t2 = 0; t2 <= token; t2++) {
                 const float *k2 = kv->kv +
                     ((size_t)L * kv->max_tokens + t2) * kvlat;
                 float acc = 0.0f;
                 for (int i = 0; i < qn_nope; i++)
                     acc += q_h[i] * k2[i];
+                /* rope term: the k's rope part (the latent's last qr,
+                 * the shared KV -- same values as the v) rotated by
+                 * the key position, dotted with the rotated q_rope */
+                if (qr > 0) {
+                    float kr_buf[64];
+                    memcpy(kr_buf, k2 + qn_nope,
+                           (size_t)qr * sizeof(float));
+                    for (int i = 0; i + 1 < qr; i += 2) {
+                        float a = (float)t2 * rope_freq[i / 2];
+                        float c = cosf(a), s = sinf(a);
+                        float x = kr_buf[i], y = kr_buf[i + 1];
+                        kr_buf[i] = x * c - y * s;
+                        kr_buf[i + 1] = x * s + y * c;
+                    }
+                    for (int i = 0; i < qr; i++)
+                        acc += qr_buf[i] * kr_buf[i];
+                }
                 sc[t2] = acc * dscale;
                 if (sinkv && t2 < sink_n) sc[t2] += sinkv[t2];
             }
