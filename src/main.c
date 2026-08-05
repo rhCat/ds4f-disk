@@ -583,7 +583,20 @@ int main(int argc, char **argv) {
              * checkpoint has the global hc_head (learned output
              * contraction); otherwise stream 0 (single-stream state) */
             const float *hstate_in = state;
-            if (tl.hc_head_fn >= 0) {
+            /* DS4F_HEAD_RAW: the head reads a raw stream instead of the
+             * hc_head A-combine -- the DEBUG11 evidence: the state moves
+             * (delta 2.18) but the A-combined head input is frozen
+             * (3.5e-7): the streams' movements cancel in the A
+             * projection and the logits freeze. DS4F_HEAD_STREAM picks
+             * the stream (default 0). */
+            if (getenv("DS4F_HEAD_RAW")) {
+                int hstream = 0;
+                const char *hs = getenv("DS4F_HEAD_STREAM");
+                if (hs) hstream = atoi(hs);
+                if (hstream < 0) hstream = 0;
+                if (hstream >= mhc_streams) hstream = mhc_streams - 1;
+                hstate_in = state + (size_t)hstream * cfg.hidden;
+            } else if (tl.hc_head_fn >= 0) {
                 const uint8_t *trh = ds4f_trunk_bind(&trunk,
                                                      cfg.n_layers - 1);
                 float A[8], C[8], B[64];
