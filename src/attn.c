@@ -255,9 +255,9 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
                    bs = cfg->rope_beta_slow, mxp = cfg->rope_max_pos;
             if (factor > 1.0 && mxp > 1.0 && bf > 0.0 && bs > 0.0) {
                 double lt = log(theta);
-                double corr_bf = (qr * log(mxp / (bf * 2.0 * M_PI))) /
+                double corr_bf = (qr * log(mxp / (bf * 2.0 * 3.14159265358979323846))) /
                                  (2.0 * lt);
-                double corr_bs = (qr * log(mxp / (bs * 2.0 * M_PI))) /
+                double corr_bs = (qr * log(mxp / (bs * 2.0 * 3.14159265358979323846))) /
                                  (2.0 * lt);
                 int low = (int)floor(corr_bf);
                 int high = (int)ceil(corr_bs);
