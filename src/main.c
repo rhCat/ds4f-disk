@@ -398,6 +398,9 @@ int main(int argc, char **argv) {
     float *prev_state = (float *)malloc(
         (size_t)cfg.hidden * mhc_streams * sizeof(float));
     if (!prev_state) return 2;
+    float *prev_hin = (float *)malloc(
+        (size_t)cfg.hidden * sizeof(float));
+    if (!prev_hin) return 2;
     int last_tok = npids > 0 ? pids[0] : -1;
 
     double t0 = now_s();
@@ -592,6 +595,26 @@ int main(int argc, char **argv) {
                 if (hok > 0) {
                     ds4f_hc_combine(nhc, cfg.hidden, A, state, xin_buf);
                     hstate_in = xin_buf;
+                }
+            }
+            if (getenv("DS4F_DEBUG11")) {
+                /* the head-input trace: the hstate_in's delta from the
+                 * previous token (the A-combined projection -- the state
+                 * moves (dbg10) but the logits freeze; is the movement
+                 * lost in the hc_head combine?) */
+                if (t == 0) {
+                    memcpy(prev_hin, hstate_in,
+                           (size_t)cfg.hidden * sizeof(float));
+                } else {
+                    double d2 = 0.0;
+                    for (int i = 0; i < cfg.hidden; i++) {
+                        float d = hstate_in[i] - prev_hin[i];
+                        d2 += (double)d * d;
+                    }
+                    fprintf(stderr, "[dbg11] t%d head_in_delta=%.6g\n",
+                            t, sqrtf((float)(d2 / (double)cfg.hidden)));
+                    memcpy(prev_hin, hstate_in,
+                           (size_t)cfg.hidden * sizeof(float));
                 }
             }
             if (ds4f_head_logits(&head, hstate_in, logits) != 0) {
