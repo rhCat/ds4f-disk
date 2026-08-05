@@ -349,6 +349,34 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
                 float wgtn = wg[t2] / sum;
                 for (int j = 0; j < vh; j++) ov[j] += wgtn * v2[j];
             }
+            if (h == 0 && getenv("DS4F_DEBUG9")) {
+                /* the frozen-F probe: score spread, the v's variation
+                 * across the cache, the softmax concentration */
+                float smin = sc[0], smax = sc[0];
+                for (int t2 = 1; t2 <= token; t2++) {
+                    if (sc[t2] < smin) smin = sc[t2];
+                    if (sc[t2] > smax) smax = sc[t2];
+                }
+                float vm = 0.0f, vv = 0.0f;
+                int np = token + 1;
+                for (int t2 = 0; t2 <= token; t2++) {
+                    float v0 = kv->kv[
+                        ((size_t)L * kv->max_tokens + t2) * kvlat +
+                        (kvlat - vh)];
+                    vm += v0; vv += v0 * v0;
+                }
+                vm /= (float)np;
+                vv = sqrtf(vv / (float)np - vm * vm);
+                float wmax = 0.0f;
+                for (int t2 = 0; t2 <= token; t2++) {
+                    float wn = wg[t2] / sum;
+                    if (wn > wmax) wmax = wn;
+                }
+                fprintf(stderr,
+                        "c9: L%-2d t%-3d scores [%.3f, %.3f] "
+                        "spread %.3f vstd %.4f wmax %.3f\n",
+                        L, token, smin, smax, smax - smin, vv, wmax);
+            }
         }
     } else {
         for (int t2 = 0; t2 <= token; t2++) {
