@@ -581,6 +581,30 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "head logits failed\n");
                 return 2;
             }
+            if (getenv("DS4F_DEBUG7")) {
+                /* the logits shape: peaked vs flat, and the top-5 ids
+                 * + their decoded tokens (the soup diagnosis) */
+                long V = head.dims[0];
+                int top[5];
+                for (int k = 0; k < 5; k++) top[k] = 0;
+                for (long i = 0; i < V; i++) {
+                    for (int k = 0; k < 5; k++) {
+                        if (logits[i] > logits[top[k]]) {
+                            for (int kk = 4; kk > k; kk--)
+                                top[kk] = top[kk - 1];
+                            top[k] = (int)i;
+                            break;
+                        }
+                    }
+                }
+                fprintf(stderr, "logits: t%-2d top5", t);
+                for (int k = 0; k < 5; k++) {
+                    char tb[64];
+                    ds4f_tokenizer_decode(&tok, &top[k], 1, tb, 64);
+                    fprintf(stderr, " [%6d %.3f %s]", top[k], logits[top[k]], tb);
+                }
+                fprintf(stderr, "\n");
+            }
             int tokid = ds4f_sample(logits, (int)head.dims[0], &rng);
             if (tok_path) {
                 char tbuf[256];
