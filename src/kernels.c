@@ -119,7 +119,7 @@ void ds4f_f8_matvec(const uint8_t *W, const uint8_t *scales,
     if (ds4f_kernels_simd()) {
         int ssc = SC < 1 ? 1 : SC;
         if (ssc == 1 || (C % ssc == 0 && ((C / ssc) % 16) == 0)) {
-            ds4f_simd_f8_matvec(W, scales, R, C, SR, ssc, x, y);
+            ds4f_simd_f8_matvec(W, scales, R, C, SR, ssc, x, y, 0, R);
             return;
         }
     }

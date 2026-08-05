@@ -2,6 +2,7 @@
 #include "ds4f/attn.h"
 #include "ds4f/kernels.h"
 #include "ds4f/moe.h"
+#include "ds4f/simd.h"
 
 #include <math.h>
 #include <pthread.h>
@@ -52,12 +53,17 @@ typedef struct {
     const float *x;
     float *y;
     int r0, r1;
+    int simd;
 } F8RowJob;
 
 static void *f8_row_worker(void *p) {
     F8RowJob *j = (F8RowJob *)p;
-    ds4f_f8_matvec_rows(j->W, j->S, j->R, j->C, j->SR, j->SC,
-                        j->x, j->y, j->r0, j->r1);
+    if (j->simd)
+        ds4f_simd_f8_matvec(j->W, j->S, j->R, j->C, j->SR, j->SC,
+                            j->x, j->y, j->r0, j->r1);
+    else
+        ds4f_f8_matvec_rows(j->W, j->S, j->R, j->C, j->SR, j->SC,
+                            j->x, j->y, j->r0, j->r1);
     return NULL;
 }
 
@@ -85,6 +91,12 @@ static void f8_matvec_t(const Ds4fTrunkLayout *tl, int wi, int si,
             static pthread_t th[16];
             static F8RowJob job[16];
             if (nth > 16) nth = 16;
+            int use_simd = 0;
+            if (ds4f_kernels_simd()) {
+                int ssc = SC < 1 ? 1 : SC;
+                if (ssc == 1 || (C % ssc == 0 && ((C / ssc) % 16) == 0))
+                    use_simd = 1;
+            }
             int chunk = (R + nth - 1) / nth;
             for (int t = 0; t < nth; t++) {
                 job[t].W = tr + tl->t[wi].off;
@@ -94,6 +106,7 @@ static void f8_matvec_t(const Ds4fTrunkLayout *tl, int wi, int si,
                 job[t].x = x; job[t].y = y;
                 job[t].r0 = t * chunk;
                 job[t].r1 = (t + 1) * chunk < R ? (t + 1) * chunk : R;
+                job[t].simd = use_simd;
                 if (job[t].r0 >= R) { job[t].r1 = job[t].r0; continue; }
                 pthread_create(&th[t], NULL, f8_row_worker, &job[t]);
             }

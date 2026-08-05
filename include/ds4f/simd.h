@@ -38,6 +38,6 @@ void ds4f_simd_i8_matvec(const uint8_t *W, const uint8_t *scales,
                          float *y);
 void ds4f_simd_f8_matvec(const uint8_t *W, const uint8_t *scales,
                          int R, int C, int SR, int SC, const float *x,
-                         float *y);
+                         float *y, int r0, int r1);
 
 #endif /* DS4F_SIMD_H */

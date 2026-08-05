@@ -180,8 +180,10 @@ void ds4f_simd_i8_matvec(const uint8_t *W, const uint8_t *scales,
  * match to the scalar LUT in kernels.c. */
 void ds4f_simd_f8_matvec(const uint8_t *W, const uint8_t *scales,
                          int R, int C, int SR, int SC, const float *x,
-                         float *y) {
-    for (int r = 0; r < R; r++) {
+                         float *y, int r0, int r1) {
+    if (r0 < 0) r0 = 0;
+    if (r1 > R) r1 = R;
+    for (int r = r0; r < r1; r++) {
         int sr = (int)(((int64_t)r * SR) / R);
         const uint8_t *wr = W + (size_t)r * C;
         float32x4_t a0 = vdupq_n_f32(0), a1 = vdupq_n_f32(0);
@@ -433,8 +435,10 @@ void ds4f_simd_i8_matvec(const uint8_t *W, const uint8_t *scales,
 
 void ds4f_simd_f8_matvec(const uint8_t *W, const uint8_t *scales,
                          int R, int C, int SR, int SC, const float *x,
-                         float *y) {
-    for (int r = 0; r < R; r++) {
+                         float *y, int r0, int r1) {
+    if (r0 < 0) r0 = 0;
+    if (r1 > R) r1 = R;
+    for (int r = r0; r < r1; r++) {
         int sr = (int)(((int64_t)r * SR) / R);
         const uint8_t *wr = W + (size_t)r * C;
         __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
@@ -586,8 +590,10 @@ void ds4f_simd_i8_matvec(const uint8_t *W, const uint8_t *scales,
 }
 void ds4f_simd_f8_matvec(const uint8_t *W, const uint8_t *scales,
                          int R, int C, int SR, int SC, const float *x,
-                         float *y) {
-    for (int r = 0; r < R; r++) {
+                         float *y, int r0, int r1) {
+    if (r0 < 0) r0 = 0;
+    if (r1 > R) r1 = R;
+    for (int r = r0; r < r1; r++) {
         int sr = (int)(((int64_t)r * SR) / R);
         const uint8_t *wr = W + (size_t)r * C;
         float s = 0.0f;
