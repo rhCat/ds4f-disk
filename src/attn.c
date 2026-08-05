@@ -518,6 +518,23 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
         for (int i = 0; i < H; i++) state[i] += chc[i];
     }
 
+    if (getenv("DS4F_DEBUG12") && token > 0) {
+        /* the F_attn token-delta: does the attention output carry the
+         * token's movement? (the state's tok_delta decays ~24%/layer;
+         * if F's delta is ~0, the attention path itself is the
+         * contraction) */
+        static float prev_f[DS4F_MAX_LAYERS][4096];
+        const float *pv = prev_f[L];
+        double d2 = 0.0;
+        for (int i = 0; i < H; i++) {
+            float d = chc[i] - pv[i];
+            d2 += (double)d * d;
+        }
+        fprintf(stderr, "[dbg12] L%d t%d Fattn_delta=%.6g\n",
+                L, token, sqrtf((float)(d2 / (double)H)));
+        memcpy(prev_f[L], chc, (size_t)H * sizeof(float));
+    }
+
     free(buf);
     return 0;
 }
