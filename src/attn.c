@@ -203,6 +203,14 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
                                tl->hc_attn_scale[L], tr, H, state,
                                &nhc, A, C, B);
     if (hc_ok < 0) { free(buf); return -1; }
+    if (hc_ok > 0) {
+        const char *cs = getenv("DS4F_C_SCALE");
+        if (cs) {
+            float sc = (float)atof(cs);
+            if (sc > 0.0f)
+                for (int j = 0; j < nhc; j++) C[j] *= sc;
+        }
+    }
     float *xin = chc + H;
     if (hc_ok)
         ds4f_hc_combine(nhc, H, A, state, xin);
@@ -388,13 +396,28 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
         double s2 = 0.0;
         for (int i = 0; i < H; i++) s2 += (double)chc[i] * chc[i];
         float rms_f = sqrtf((float)(s2 / (double)H)) + 1e-30f;
-        float gain = rms_in / rms_f;
-        /* F-rescale: OFF by default -- the A/B showed the raw attention
-         * output routes better (82.2% vs 75.1% hits, bytes/token 0.31
-         * vs 0.43). DS4F_F_RESCALE=1 opts INTO the rms_in clamp. */
-        if (getenv("DS4F_F_RESCALE"))
-            if (gain > 0.0f && gain < 1e30f)
-                for (int i = 0; i < H; i++) chc[i] *= gain;
+        if (hc_ok) {
+            /* F-rescale: OFF by default -- the A/B showed the raw attention
+             * output routes better (82.2% vs 75.1% hits, bytes/token 0.31
+             * vs 0.43). DS4F_F_RESCALE=1 opts INTO the rms_in clamp. */
+            float gain = rms_in / rms_f;
+            if (getenv("DS4F_F_RESCALE"))
+                if (gain > 0.0f && gain < 1e30f)
+                    for (int i = 0; i < H; i++) chc[i] *= gain;
+            if (getenv("DS4F_DEBUG8")) {
+                double f2 = 0.0;
+                for (int i = 0; i < H; i++)
+                    f2 += (double)chc[i] * chc[i];
+                fprintf(stderr, "c8: L%-2d C[", L);
+                for (int j = 0; j < nhc; j++)
+                    fprintf(stderr, " %.4f", C[j]);
+                fprintf(stderr, "] A[");
+                for (int j = 0; j < nhc; j++)
+                    fprintf(stderr, " %.4f", A[j]);
+                fprintf(stderr, "] Frms %.4f rms_in %.4f\n",
+                        sqrtf((float)(f2 / (double)H)), rms_in);
+            }
+        }
         /* new[j*H+i] = sum_k B[j][k]*state[k*H+i] + C[j]*chc[i] */
         float mix[8];
         for (int i = 0; i < H; i++) {
