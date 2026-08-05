@@ -518,6 +518,23 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
         for (int i = 0; i < H; i++) state[i] += chc[i];
     }
 
+    if (getenv("DS4F_DEBUG13") && token > 0) {
+        /* the per-stream token-deltas: where the state's movement
+         * lives (which of the 4 mHC streams carries the token) */
+        static float prev_s13[DS4F_MAX_LAYERS][8][4096];
+        const float *pv = prev_s13[L];
+        for (int j = 0; j < nhc; j++) {
+            double d2 = 0.0;
+            const float *cur = state + (size_t)j * H;
+            for (int i = 0; i < H; i++) {
+                float d = cur[i] - pv[j * H + i];
+                d2 += (double)d * d;
+            }
+            fprintf(stderr, "[dbg13] L%d t%d s%d delta=%.6g\n",
+                    L, token, j, sqrtf((float)(d2 / (double)H)));
+        }
+        memcpy(prev_s13[L], state, (size_t)nhc * H * sizeof(float));
+    }
     if (getenv("DS4F_DEBUG12") && token > 0) {
         /* the F_attn token-delta: does the attention output carry the
          * token's movement? (the state's tok_delta decays ~24%/layer;
