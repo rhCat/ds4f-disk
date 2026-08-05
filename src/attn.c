@@ -236,7 +236,7 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
     float dscale = 1.0f / sqrtf((float)(real_mla ? qh : qdim));
     int sink_n = 0;
     const float *sinkv = NULL;
-    if (sink_i >= 0) {
+    if (sink_i >= 0 && !getenv("DS4F_NO_SINK")) {
         sink_n = (int)tl->t[sink_i].nbytes / (int)sizeof(float);
         sinkv = (const float *)(const void *)(tr + tl->t[sink_i].off);
     }
