@@ -140,6 +140,28 @@ void ds4f_f8_matvec(const uint8_t *W, const uint8_t *scales,
     }
 }
 
+void ds4f_f8_matvec_rows(const uint8_t *W, const uint8_t *scales,
+                         int R, int C, int SR, int SC, const float *x,
+                         float *y, int r0, int r1) {
+    if (!fp8_lut_ready) fp8_lut_build();
+    if (SR < 1) SR = 1;
+    if (SC < 1) SC = 1;
+    if (r0 < 0) r0 = 0;
+    if (r1 > R) r1 = R;
+    for (int r = r0; r < r1; r++) {
+        float acc = 0.0f;
+        int sr = (int)(((int64_t)r * SR) / R);      /* GLOBAL row block */
+        const uint8_t *wr = W + (size_t)r * C;
+        for (int c = 0; c < C; c++) {
+            int sc = (int)(((int64_t)c * SC) / C);
+            float s = scales ? ds4f_e8m0_value(scales[sr * SC + sc])
+                             : 1.0f;
+            acc += fp8_lut[wr[c]] * s * x[c];
+        }
+        y[r] = acc;
+    }
+}
+
 void ds4f_f8_decode_row(const uint8_t *W, const uint8_t *scales,
                         int V, int H, int SR, int SC, int row, float *out) {
     if (!fp8_lut_ready) fp8_lut_build();

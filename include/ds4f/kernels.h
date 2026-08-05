@@ -70,6 +70,13 @@ void ds4f_i8_matvec(const uint8_t *W, const uint8_t *scales,
                     int R, int C, int SR, int SC, const float *x,
                     float *y);
 
+/* row-range variant for threaded callers: computes rows [r0, r1)
+ * with the GLOBAL row scale mapping (sr = (r*SR)/R for the absolute
+ * row r). Scalar only (the SIMD path handles the whole matrix). */
+void ds4f_f8_matvec_rows(const uint8_t *W, const uint8_t *scales,
+                         int R, int C, int SR, int SC, const float *x,
+                         float *y, int r0, int r1);
+
 /* F16 (IEEE half) matvec + scalar conversion. */
 float ds4f_f16_to_f32(uint16_t h);
 void ds4f_f16_matvec(const uint16_t *W, int R, int C, const float *x,

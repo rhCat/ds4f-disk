@@ -4,6 +4,7 @@
 #include "ds4f/moe.h"
 
 #include <math.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -41,7 +42,25 @@ void ds4f_kv_free(Ds4fKvCache *c) {
     memset(c, 0, sizeof *c);
 }
 
-/* E8M0 group-scale matvec wrapper: pulls SR/SC from the scale tensor. */
+/* E8M0 group-scale matvec wrapper: pulls SR/SC from the scale tensor.
+ * Large matrices (R >= 2048) run row-partitioned across DS4F_ATTN_THREADS
+ * workers (default 8) -- the attention's wo_a/wo_b/wq_b are the dominant
+ * arithmetic once the real MLA runs (issue #6). */
+typedef struct {
+    const uint8_t *W, *S;
+    int R, C, SR, SC;
+    const float *x;
+    float *y;
+    int r0, r1;
+} F8RowJob;
+
+static void *f8_row_worker(void *p) {
+    F8RowJob *j = (F8RowJob *)p;
+    ds4f_f8_matvec_rows(j->W, j->S, j->R, j->C, j->SR, j->SC,
+                        j->x, j->y, j->r0, j->r1);
+    return NULL;
+}
+
 static void f8_matvec_t(const Ds4fTrunkLayout *tl, int wi, int si,
                         const uint8_t *tr, int R, int C, const float *x,
                         float *y) {
@@ -53,6 +72,34 @@ static void f8_matvec_t(const Ds4fTrunkLayout *tl, int wi, int si,
             SC = (int)s->dims[1];
         } else if (s->rank == 1) {
             SC = (int)s->dims[0];
+        }
+    }
+    if (R >= 2048 && C >= 256) {
+        int nth = 8;
+        const char *env = getenv("DS4F_ATTN_THREADS");
+        if (env) {
+            int v = atoi(env);
+            if (v >= 1 && v <= 32) nth = v;
+        }
+        if (nth > 1) {
+            static pthread_t th[16];
+            static F8RowJob job[16];
+            if (nth > 16) nth = 16;
+            int chunk = (R + nth - 1) / nth;
+            for (int t = 0; t < nth; t++) {
+                job[t].W = tr + tl->t[wi].off;
+                job[t].S = tr + tl->t[si].off;
+                job[t].R = R; job[t].C = C;
+                job[t].SR = SR; job[t].SC = SC;
+                job[t].x = x; job[t].y = y;
+                job[t].r0 = t * chunk;
+                job[t].r1 = (t + 1) * chunk < R ? (t + 1) * chunk : R;
+                if (job[t].r0 >= R) { job[t].r1 = job[t].r0; continue; }
+                pthread_create(&th[t], NULL, f8_row_worker, &job[t]);
+            }
+            for (int t = 0; t < nth; t++)
+                if (job[t].r1 > job[t].r0) pthread_join(th[t], NULL);
+            return;
         }
     }
     ds4f_f8_matvec(tr + tl->t[wi].off, tr + tl->t[si].off,
