@@ -416,6 +416,18 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
         for (int i = 0; i < nhc * H; i++) t2 += (double)state[i] * state[i];
         float rms_s = sqrtf((float)(t2 / (double)(nhc * H))) + 1e-30f;
         float sgain = rms_in / rms_s;
+        /* the rms_in target is a fixed point at the embed's scale
+         * (~0.001): the state stays dead and the head reads ~0 logits
+         * (the flat softmax = the multi-language soup). DS4F_STATE_RMS_TARGET
+         * overrides the target with a fixed norm (1.0 = the normed
+         * scale the trained head expects). */
+        {
+            const char *tgt = getenv("DS4F_STATE_RMS_TARGET");
+            if (tgt) {
+                float t = (float)atof(tgt);
+                if (t > 0.0f) sgain = t / rms_s;
+            }
+        }
         if (!getenv("DS4F_NO_STATE_RESCALE"))
             if (sgain > 0.0f && sgain < 1e30f)
                 for (int i = 0; i < nhc * H; i++) state[i] *= sgain;

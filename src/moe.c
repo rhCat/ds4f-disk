@@ -706,7 +706,9 @@ int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
                     }
                     for (int j = 0; j < nhc; j++) state[j * H + i] = mix[j];
                 }
-                /* state-rescale to the layer-input RMS (see attn.c) */
+                /* state-rescale to the layer-input RMS (see attn.c);
+                 * DS4F_STATE_RMS_TARGET overrides the target (same
+                 * dead-state-at-embed-scale issue) */
                 {
                     double t2 = 0.0;
                     for (int i = 0; i < nhc * H; i++)
@@ -714,6 +716,11 @@ int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
                     float rms_s =
                         sqrtf((float)(t2 / (double)(nhc * H))) + 1e-30f;
                     float sgain = rms_in / rms_s;
+                    const char *tgt = getenv("DS4F_STATE_RMS_TARGET");
+                    if (tgt) {
+                        float t = (float)atof(tgt);
+                        if (t > 0.0f) sgain = t / rms_s;
+                    }
                     if (sgain > 0.0f && sgain < 1e30f)
                         for (int i = 0; i < nhc * H; i++)
                             state[i] *= sgain;
