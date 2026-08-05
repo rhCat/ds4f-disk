@@ -168,6 +168,8 @@ int ds4f_trunk_layout_load(Ds4fTrunkLayout *tl, const char *path) {
         tl->attn_wob[L] = tl->attn_wob_s[L] = -1;
         tl->attn_woc[L] = tl->attn_woc_s[L] = -1;
         tl->attn_sink[L] = -1;
+        tl->attn_norm[L] = -1;
+        tl->ffn_norm[L] = -1;
         tl->hc_attn_fn[L] = tl->hc_attn_base[L] = tl->hc_attn_scale[L] = -1;
         tl->hc_ffn_fn[L] = tl->hc_ffn_base[L] = tl->hc_ffn_scale[L] = -1;
     }
@@ -271,6 +273,10 @@ int ds4f_trunk_layout_load(Ds4fTrunkLayout *tl, const char *path) {
                     if (tl->attn_qn[L] < 0) tl->attn_qn[L] = k - 1;
                 } else if (name_ends(tt->name, ".attn.kv_norm.weight")) {
                     if (tl->attn_kvn[L] < 0) tl->attn_kvn[L] = k - 1;
+                } else if (name_ends(tt->name, ".attn_norm.weight")) {
+                    if (tl->attn_norm[L] < 0) tl->attn_norm[L] = k - 1;
+                } else if (name_ends(tt->name, ".ffn_norm.weight")) {
+                    if (tl->ffn_norm[L] < 0) tl->ffn_norm[L] = k - 1;
                 } else if (name_ends(tt->name, ".attn.wq_a.weight")) {
                     if (tl->attn_wqa[L] < 0) tl->attn_wqa[L] = k - 1;
                 } else if (name_ends(tt->name, ".attn.wq_a.scale")) {
@@ -445,6 +451,20 @@ static float hc_elem(const Ds4fTrunkTensor *t, const uint8_t *tr, long i) {
 
 /* Sinkhorn-Knopp: B = doubly stochastic projection of exp(Btilde)
  * (paper eq. 8), 20 row/col normalizations. */
+/* in-place RMSNorm with BF16 weights (the attn.c counterpart;
+ * applies the checkpoint's layer norms, eps 1e-6) */
+static void rmsnorm_moe(const uint16_t *w, int dim, float *x) {
+    double ss = 0.0;
+    for (int i = 0; i < dim; i++) ss += (double)x[i] * x[i];
+    float r = sqrtf((float)(ss / (double)dim) + 1e-6f);
+    for (int i = 0; i < dim; i++) {
+        uint32_t bits = (uint32_t)w[i] << 16;  /* bf16 = top half */
+        float bv;
+        memcpy(&bv, &bits, 4);
+        x[i] = x[i] / r * bv;
+    }
+}
+
 static void sinkhorn(const float *btilde, int n, float *B) {
     double M[64];
     for (int i = 0; i < n * n; i++) M[i] = exp((double)btilde[i]);
@@ -568,6 +588,12 @@ int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
         if (!orig || !xin) { free(orig); free(xin); return -1; }
         memcpy(orig, state, (size_t)nhc * H * sizeof(float));
         ds4f_hc_combine(nhc, H, A, state, xin);
+        /* the real model's post_attention_layernorm (was never
+         * applied -- the raw state fed the router/experts) */
+        if (tl->ffn_norm[L] >= 0)
+            rmsnorm_moe((const uint16_t *)(const void *)(
+                            tr + tl->t[tl->ffn_norm[L]].off),
+                        H, xin);
     }
 
     /* Entry RMS: the F-rescale target (hc) or the RMS-rescale fallback

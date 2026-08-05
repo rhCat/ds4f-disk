@@ -100,6 +100,9 @@ int main(void) {
     tl.attn_wob[0] = 8;  tl.attn_wob_s[0] = 9;
     tl.attn_woc[0] = 10; tl.attn_woc_s[0] = 11;
     tl.attn_sink[0] = 14;
+    tl.attn_norm[0] = -1;   /* the layer norms: not in the
+                              fixture (the attention is tested raw) */
+    tl.ffn_norm[0] = -1;
     tl.kvlat = 4;
     int idx = 0;
     /* wq_a [4,8] F8 */

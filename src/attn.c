@@ -228,6 +228,14 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
         ds4f_hc_combine(nhc, H, A, state, xin);
     else
         xin = state;
+    /* the real model's input_layernorm: norm the attention's input
+     * with the checkpoint's attn_norm (was never applied -- the raw
+     * A-combined state fed the projections and the state grew
+     * unbounded) */
+    if (tl->attn_norm[L] >= 0)
+        rmsnorm((const uint16_t *)(const void *)(
+                    tr + tl->t[tl->attn_norm[L]].off),
+                H, xin);
     /* layer-input RMS: the F-rescale target (see the update below) */
     double x2 = 0.0;
     for (int i = 0; i < H; i++) x2 += (double)xin[i] * xin[i];

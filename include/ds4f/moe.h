@@ -69,6 +69,8 @@ typedef struct Ds4fTrunkLayout {
     int   attn_wob[DS4F_MAX_LAYERS],  attn_wob_s[DS4F_MAX_LAYERS];
     int   attn_woc[DS4F_MAX_LAYERS],  attn_woc_s[DS4F_MAX_LAYERS];
     int   attn_sink[DS4F_MAX_LAYERS];
+    int   attn_norm[DS4F_MAX_LAYERS]; /* input_layernorm (BF16) */
+    int   ffn_norm[DS4F_MAX_LAYERS]; /* post_attention_layernorm */
     /* mHC (issue #6 step 6): per layer, three tensors per connection:
      * fn = the W projections (cols: pre, post, res), base = the S
      * biases (same order), scale = the alpha gating scalars
