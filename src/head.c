@@ -231,6 +231,14 @@ int ds4f_head_logits(const Ds4fHead *h, const float *state, float *logits) {
     return 0;
 }
 
+int ds4f_argmax(const float *logits, int V) {
+    int best = 0;
+    float bv = logits[0];
+    for (int i = 1; i < V; i++)
+        if (logits[i] > bv) { bv = logits[i]; best = i; }
+    return best;
+}
+
 int ds4f_embed_gather(const Ds4fEmbed *e, int tok, float *out) {
     if (!e || !e->buf || e->rank != 2) return -1;
     long V = e->dims[0], H = e->dims[1];

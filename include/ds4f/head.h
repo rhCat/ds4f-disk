@@ -48,4 +48,7 @@ int ds4f_embed_gather(const Ds4fEmbed *e, int tok, float *out);
 /* Deterministic top-k-free softmax sample: mutates *rng. */
 int ds4f_sample(const float *logits, int V, uint64_t *rng);
 
+/* Greedy: the argmax token id (the DS4F_GREEDY sampling mode). */
+int ds4f_argmax(const float *logits, int V);
+
 #endif /* DS4F_HEAD_H */

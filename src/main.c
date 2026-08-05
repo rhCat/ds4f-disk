@@ -597,7 +597,16 @@ int main(int argc, char **argv) {
                         }
                     }
                 }
-                fprintf(stderr, "logits: t%-2d top5", t);
+                double sr2 = 0.0;
+                for (long i = 0; i < (long)cfg.hidden * 4; i++)
+                    sr2 += (double)state[i] * state[i];
+                float srms = sqrtf((float)(sr2 / (double)(cfg.hidden * 4)));
+                double hr2 = 0.0;
+                for (long i = 0; i < (long)cfg.hidden; i++)
+                    hr2 += (double)hstate_in[i] * hstate_in[i];
+                float hrms = sqrtf((float)(hr2 / (double)cfg.hidden));
+                fprintf(stderr, "logits: t%-2d state_rms %.3f head_rms %.3f"
+                                " top5", t, srms, hrms);
                 for (int k = 0; k < 5; k++) {
                     char tb[64];
                     ds4f_tokenizer_decode(&tok, &top[k], 1, tb, 64);
@@ -605,7 +614,11 @@ int main(int argc, char **argv) {
                 }
                 fprintf(stderr, "\n");
             }
-            int tokid = ds4f_sample(logits, (int)head.dims[0], &rng);
+            int tokid;
+            if (getenv("DS4F_GREEDY"))
+                tokid = ds4f_argmax(logits, (int)head.dims[0]);
+            else
+                tokid = ds4f_sample(logits, (int)head.dims[0], &rng);
             if (tok_path) {
                 char tbuf[256];
                 int tl = ds4f_tokenizer_decode(&tok, &tokid, 1, tbuf, 256);
