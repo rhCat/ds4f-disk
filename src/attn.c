@@ -232,7 +232,7 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
      * with the checkpoint's attn_norm (was never applied -- the raw
      * A-combined state fed the projections and the state grew
      * unbounded) */
-    if (tl->attn_norm[L] >= 0)
+    if (tl->attn_norm[L] >= 0 && !getenv("DS4F_NO_NORMS"))
         rmsnorm((const uint16_t *)(const void *)(
                     tr + tl->t[tl->attn_norm[L]].off),
                 H, xin);

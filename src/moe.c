@@ -590,7 +590,7 @@ int ds4f_moe_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
         ds4f_hc_combine(nhc, H, A, state, xin);
         /* the real model's post_attention_layernorm (was never
          * applied -- the raw state fed the router/experts) */
-        if (tl->ffn_norm[L] >= 0)
+        if (tl->ffn_norm[L] >= 0 && !getenv("DS4F_NO_NORMS"))
             rmsnorm_moe((const uint16_t *)(const void *)(
                             tr + tl->t[tl->ffn_norm[L]].off),
                         H, xin);
