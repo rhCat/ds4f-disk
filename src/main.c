@@ -251,6 +251,9 @@ int main(int argc, char **argv) {
         }
         fprintf(stderr, "hc: mHC on %d/%d attn, %d/%d ffn\n",
                 nha, cfg.n_layers, nhf, cfg.n_layers);
+        fprintf(stderr, "attn: %s (heads %d, qk_rope %d)\n",
+                cfg.n_heads > 0 ? "real MLA" : "kvhalf fallback",
+                cfg.n_heads, cfg.qk_rope);
         for (int L = 0; L < 1 && L < cfg.n_layers; L++) {
             int idx[3] = { tl.hc_attn_fn[L], tl.hc_attn_base[L],
                            tl.hc_attn_scale[L] };
