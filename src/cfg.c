@@ -65,6 +65,15 @@ int ds4f_cfg_load(Ds4fCfg *cfg, const char *model_dir) {
     cfg->latent      = GETI("latent");
     cfg->moe_inter   = GETI("moe_inter");
     cfg->expert_nbytes = (int64_t)GETI("expert_nbytes");
+    /* optional: the real MLA geometry (absent in the fixture -> 0 -> the
+     * kvhalf fallback path) */
+    {
+        const JEntry *e = json_get(doc->root, doc->nroot,
+                                   "num_attention_heads");
+        cfg->n_heads = (e && e->type == 0) ? (int)e->inum : 0;
+        e = json_get(doc->root, doc->nroot, "qk_rope_head_dim");
+        cfg->qk_rope = (e && e->type == 0) ? (int)e->inum : 0;
+    }
 #undef GETI
     cfg->n_shards = 1;
     const JEntry *se = json_get(doc->root, doc->nroot, "seed");

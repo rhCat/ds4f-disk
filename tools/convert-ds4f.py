@@ -421,6 +421,10 @@ def cmd_convert(dirpath, outdir):
         "expert_nbytes": expert_bytes,
         "seed": 7,
     }
+    # the real MLA geometry (optional; the engine falls back without it)
+    for src_key in ("num_attention_heads", "qk_rope_head_dim"):
+        if config is not None and src_key in config:
+            cfg_out[src_key] = int(config[src_key])
     with open(os.path.join(outdir, "config.json"), "w") as f:
         json.dump(cfg_out, f, indent=2)
     print(f"config.json written (expert_nbytes={expert_bytes})")

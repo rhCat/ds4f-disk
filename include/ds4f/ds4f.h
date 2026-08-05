@@ -61,6 +61,8 @@ typedef struct Ds4fCfg {
     int      hidden;         /* hidden width */
     int      latent;         /* latent width (2D factor: shared proj) */
     int      moe_inter;      /* expert MLP intermediate width */
+    int      n_heads;        /* attention heads (0 = the kvhalf fallback) */
+    int      qk_rope;        /* qk_rope_head_dim (0 = no rope term) */
     int64_t  expert_nbytes;  /* fixed-rate payload, one routed expert */
     int      n_shards;
     uint64_t seed;

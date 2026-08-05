@@ -85,27 +85,51 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
     if (kvlat < 2 || kvhalf < 1 || H < 1) return -1;
     if (!kv || !kv->kv || token < 0 || token >= kv->max_tokens) return 0;
 
-    /* distinct buffers, no reuse: ql(qlat) q(qdim) outv(kvhalf)
-     * kvlat_buf(kvlat) scores(w) wgt(w) + H-width wo-chain temps
-     * (cha, chb, chc). The chain runs at H width -- reusing the
-     * latent-sized buffers overflowed them (garbage tokens). */
+    /* ---- the real MLA (V4-class, layout-driven) ----
+     * per-head q width qh = qdim/heads; qn = qh - qk_rope (the rope
+     * term skipped in v1); v width vh = wo_a.dims[1]/heads; the latent
+     * is [k_nope qn; v vh]; outv = concat of per-head v-sums. The
+     * kvhalf single-head path stays as the fallback (fixtures). */
+    int heads = cfg->n_heads;
+    int qh = qdim, qn_nope = qdim, vh = kvhalf, outv_n = kvhalf;
+    int real_mla = 0;
+    long ar = H, br = H;
+    if (heads > 0 && qdim % heads == 0 && tl->t[woa].rank == 2 &&
+        (int)tl->t[woa].dims[1] % heads == 0 &&
+        tl->t[wob].rank == 2) {
+        qh = qdim / heads;
+        vh = (int)tl->t[woa].dims[1] / heads;
+        qn_nope = qh - (cfg->qk_rope > 0 ? cfg->qk_rope : 0);
+        if (qn_nope < 1) qn_nope = qh;
+        if (vh >= 1 && vh <= kvlat && qn_nope <= kvlat &&
+            qn_nope + vh <= kvlat + 1) {
+            real_mla = 1;
+            outv_n = heads * vh;
+            ar = tl->t[woa].dims[0];
+            br = tl->t[wob].dims[0];
+        }
+    }
     int w = token + 1;
+    int w_sc = real_mla ? heads * w : w;
+    int cha_n = (int)(ar > H ? ar : H);
+    int chb_n = (int)(br > H ? br : H);
     /* calloc: any untouched tail (scores/wgt at short windows, or a
      * skipped chain) must be zero, not malloc garbage -- the softmax
      * and combine read them (determinism, issue #6 step 5). */
-    float *buf = (float *)calloc((size_t)(qlat + qdim + kvhalf + kvlat +
-                                          2 * w + 4 * H + 1),
-                                 sizeof(float));
+    float *buf = (float *)calloc(
+        (size_t)(qlat + qdim + outv_n + kvlat + 2 * w_sc +
+                 cha_n + chb_n + 2 * H + 1),
+        sizeof(float));
     if (!buf) return -1;
     float *ql = buf;
     float *q = ql + qlat;
     float *outv = q + qdim;
-    float *kvlat_buf = outv + kvhalf;
+    float *kvlat_buf = outv + outv_n;
     float *scores = kvlat_buf + kvlat;
-    float *wgt = scores + w;
-    float *cha = wgt + w;
-    float *chb = cha + H;
-    float *chc = chb + H;
+    float *wgt = scores + w_sc;
+    float *cha = wgt + w_sc;
+    float *chb = cha + cha_n;
+    float *chc = chb + chb_n;
 
     /* mHC (issue #6 step 6): F_attn sees x_in = A·vec(X) (the n_hc
      * residual streams combined); the update is
@@ -143,44 +167,86 @@ int ds4f_attn_step(const Ds4fCfg *cfg, const Ds4fTrunkLayout *tl, int L,
     else
         memcpy(q, ql, (size_t)qlat * sizeof(float));
 
-    /* scores over cached positions 0..token (causal), + sink boost */
-    float dscale = 1.0f / sqrtf((float)qdim);
+    /* scores over cached positions 0..token (causal), + sink boost.
+     * Real MLA: per head, q_nope . k_nope / sqrt(qh) (the rope term
+     * is the documented v1 skip). Fallback: the old single-head
+     * kvhalf path. */
+    float dscale = 1.0f / sqrtf((float)(real_mla ? qh : qdim));
     int sink_n = 0;
     const float *sinkv = NULL;
     if (sink_i >= 0) {
         sink_n = (int)tl->t[sink_i].nbytes / (int)sizeof(float);
         sinkv = (const float *)(const void *)(tr + tl->t[sink_i].off);
     }
-    for (int t2 = 0; t2 <= token; t2++) {
-        const float *k2 = kv->kv +
-            ((size_t)L * kv->max_tokens + t2) * kvlat;
-        float acc = 0.0f;
-        for (int i = 0; i < kvhalf; i++) acc += q[i] * k2[i];
-        scores[t2] = acc * dscale;
-        if (sinkv && t2 < sink_n) scores[t2] += sinkv[t2];
+    if (real_mla) {
+        for (int h = 0; h < heads; h++) {
+            const float *q_h = q + (size_t)h * qh;
+            float *sc = scores + (size_t)h * w;
+            float *wg = wgt + (size_t)h * w;
+            for (int t2 = 0; t2 <= token; t2++) {
+                const float *k2 = kv->kv +
+                    ((size_t)L * kv->max_tokens + t2) * kvlat;
+                float acc = 0.0f;
+                for (int i = 0; i < qn_nope; i++)
+                    acc += q_h[i] * k2[i];
+                sc[t2] = acc * dscale;
+                if (sinkv && t2 < sink_n) sc[t2] += sinkv[t2];
+            }
+            float mx = sc[0];
+            for (int t2 = 1; t2 <= token; t2++)
+                if (sc[t2] > mx) mx = sc[t2];
+            float sum = 0.0f;
+            for (int t2 = 0; t2 <= token; t2++) {
+                wg[t2] = expf(sc[t2] - mx);
+                sum += wg[t2];
+            }
+            float *ov = outv + (size_t)h * vh;
+            for (int j = 0; j < vh; j++) ov[j] = 0.0f;
+            for (int t2 = 0; t2 <= token; t2++) {
+                const float *v2 = kv->kv +
+                    ((size_t)L * kv->max_tokens + t2) * kvlat +
+                    (kvlat - vh);
+                float wgtn = wg[t2] / sum;
+                for (int j = 0; j < vh; j++) ov[j] += wgtn * v2[j];
+            }
+        }
+    } else {
+        for (int t2 = 0; t2 <= token; t2++) {
+            const float *k2 = kv->kv +
+                ((size_t)L * kv->max_tokens + t2) * kvlat;
+            float acc = 0.0f;
+            for (int i = 0; i < kvhalf; i++) acc += q[i] * k2[i];
+            scores[t2] = acc * dscale;
+            if (sinkv && t2 < sink_n) scores[t2] += sinkv[t2];
+        }
+        float mx = scores[0];
+        for (int t2 = 1; t2 <= token; t2++)
+            if (scores[t2] > mx) mx = scores[t2];
+        float sum = 0.0f;
+        for (int t2 = 0; t2 <= token; t2++) {
+            wgt[t2] = expf(scores[t2] - mx);
+            sum += wgt[t2];
+        }
+        for (int i = 0; i < kvhalf; i++) outv[i] = 0.0f;
+        for (int t2 = 0; t2 <= token; t2++) {
+            const float *v2 = kv->kv +
+                ((size_t)L * kv->max_tokens + t2) * kvlat + kvhalf;
+            float w = wgt[t2] / sum;
+            for (int i = 0; i < kvhalf; i++) outv[i] += w * v2[i];
+        }
     }
 
-    /* softmax */
-    float mx = scores[0];
-    for (int t2 = 1; t2 <= token; t2++)
-        if (scores[t2] > mx) mx = scores[t2];
-    float sum = 0.0f;
-    for (int t2 = 0; t2 <= token; t2++) {
-        wgt[t2] = expf(scores[t2] - mx);
-        sum += wgt[t2];
+    /* output chain. Real MLA: wo_a [ar x outv_n] then wo_b [br x ar]
+     * (the real V4 chain, no wo_c). Fallback: the old H-width chain. */
+    if (real_mla) {
+        f8_matvec_t(tl, woa, woa_s, tr, (int)ar, outv_n, outv, cha);
+        f8_matvec_t(tl, wob, wob_s, tr, (int)br, (int)ar, cha, chb);
+        memcpy(chc, chb, (size_t)H * sizeof(float));
+    } else {
+        f8_matvec_t(tl, woa, woa_s, tr, H, kvhalf, outv, cha);
+        f8_matvec_t(tl, wob, wob_s, tr, H, H, cha, chb);
+        f8_matvec_t(tl, woc, woc_s, tr, H, H, chb, chc);
     }
-    for (int i = 0; i < kvhalf; i++) outv[i] = 0.0f;
-    for (int t2 = 0; t2 <= token; t2++) {
-        const float *v2 = kv->kv +
-            ((size_t)L * kv->max_tokens + t2) * kvlat + kvhalf;
-        float w = wgt[t2] / sum;
-        for (int i = 0; i < kvhalf; i++) outv[i] += w * v2[i];
-    }
-
-    /* output chain at H width: wo_a -> wo_b -> wo_c */
-    f8_matvec_t(tl, woa, woa_s, tr, H, kvhalf, outv, cha);
-    f8_matvec_t(tl, wob, wob_s, tr, H, H, cha, chb);
-    f8_matvec_t(tl, woc, woc_s, tr, H, H, chb, chc);
     if (hc_ok) {
         /* F-rescale: the approximate attention reads amplify (the real
          * model bounds F by training against the manifold-constrained
